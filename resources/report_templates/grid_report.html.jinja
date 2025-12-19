@@ -1,0 +1,466 @@
+<html>
+<head>
+    <meta charset="utf-8"/>
+    <title>MaxLab Live Report</title>
+    <style>
+        @page {
+            margin: 0px;
+
+            width:  {{pageWidth}}px;
+            height:  {{pageHeight}}px;
+
+            {% if exportType == "WithHeaderAndFooter" %}
+            @bottom-right {
+                /*include page numbers*/
+                content: counter(page);
+
+                font-family: 'Arial', sans-serif;
+                font-size: {{footerFontSizePx}}px;
+                font-weight: bold;
+
+                margin-right: {{bodyMarginRightPx}}px;
+                margin-top: -300px;
+            }
+            {% endif %}
+        }
+
+        @media print {
+            .page {
+                page-break-after: always;
+            }
+        }
+
+        html {
+            box-decoration-break: clone;
+
+            {% if exportType == "WithHeaderAndFooter" %}
+            margin-top: 250px;
+            margin-bottom: 200px;
+            {% endif %}
+        }
+
+        body {
+            box-decoration-break: clone;
+
+            font-family: 'Arial', sans-serif;
+            font-size: {{bodyFontSizePx}}px;
+
+            margin-left: {{bodyMarginLeftPx}}px;
+            margin-right: {{bodyMarginRightPx}}px;
+
+            {% if debugMode  %}
+            border: 5px dotted #ec5f42;
+            {% endif %}
+        }
+
+        main {
+            margin: 0px;
+
+            box-decoration-break: clone;
+
+            {% if debugMode  %}
+            border: 5px dotted #1a663d;
+            {% endif %}
+        }
+
+        h1 {
+            color: #135BA3;
+        }
+
+        h2 {
+            margin-top: 66px;
+            margin-bottom: 8px;
+            color: #43B2EF;
+        }
+
+        div.break {
+            page-break-before: always;
+        }
+
+        .tag-figure-description {
+            margin-top: 20px;
+            font-size: {{tagFigureDescriptionFontSizePx}}px;
+        }
+
+        td {
+            vertical-align: top;
+            padding: 0px;
+        }
+
+        thead {
+            display: table-header-group;
+        }
+
+        .plot-image {
+            image-resolution: 300dpi;
+            height: auto;
+        }
+
+        .figure-table {
+            border-collapse: separate;
+            border-spacing: 10px 10px;
+            border: none;
+            {% if alignToCenter %}
+                margin-left: auto;
+                margin-right: auto;
+            {% endif %}
+        }
+
+        .header-cell {
+            border-radius: 5px;
+            padding: 5px;
+            margin: 5px;
+            border-style: solid;
+            border-width: 2px;
+            text-align: center;
+            font-size: {{headerCaptionFontSizePx}}px;
+        }
+
+        .header-cell-column {
+            height: {{gridReportHeaderSizePx}}px;
+            line-height: {{gridReportHeaderSizePx}}px;
+            vertical-align: baseline;
+        }
+
+        .row-header {
+            width: {{gridReportHeaderSizePx}}px;
+        }
+
+        .row-header-absolute-div {
+            position: absolute;
+            width: 0px;
+            height: 0px;
+        }
+
+        .row-header-relative-div {
+            position: relative;
+            top: -{{gridReportHeaderSizePx / 2}}px;
+            left: -{{500 - (gridReportHeaderSizePx / 2)}}px;
+            transform: rotate(-90deg);
+            text-align: center;
+            line-height: {{gridReportHeaderSizePx}}px;
+            width: 1000px;
+            height: {{gridReportHeaderSizePx}}px;
+        }
+
+        .plot {
+            display: flex;
+            flex-direction: column;
+            background-color: #ffffff;
+            border-radius: 5px;
+            padding: 10px;
+            border-style: solid;
+            border-width: 1px;
+            border-color: #ababab;
+        }
+
+        .cell-text {
+            font-weight: normal;
+            margin-bottom: {{gridCellTextMarginBottomPx}}px;
+        }
+
+        .group-title {
+            font-weight: bold;
+            height: {{gridGroupTitleHeightPx}}px;
+        }
+
+        .group-spacer-vertical {
+            height: {{gridGroupTitleHeightPx+11}}px;
+        }
+
+        .group-spacer-horizontal {
+            width: 9px;
+        }
+
+        .group {
+            border-radius: 10px;
+            padding: 10px;
+        }
+
+        .truncate-text {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .group-table {
+            border-radius: 15px;
+            border-style: solid;
+            border-width: 1px;
+            padding: 10px;
+        }
+
+        .plot-table {
+            border-collapse: collapse;
+            border-spacing: 0px 0px;
+            border: none;
+        }
+
+        .plot-table-spacer {
+            width: 10px;
+            height: 10px;
+        }
+
+        .non-page-breaking {
+            page-break-inside: avoid;
+        }
+
+        .summary-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            font-size: {{bodyFontSizePx}}px;
+            text-align: left;
+        }
+
+        .summary-table thead th {
+            background-color:  #43B2EF;
+            color: #fff;
+            font-weight: bold;
+            padding: 12px;
+            border: 1px solid #A0D8F6;
+        }
+
+        .summary-table tbody td {
+            padding: 12px;
+            border: 1px solid #A0D8F6;
+            color: #000; /* Black text */
+        }
+
+        .summary-table tbody tr:nth-child(even) {
+            background-color: #f9f9f9; /* Slightly off-white */
+        }
+
+         .metadata-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            font-size: {{bodyFontSizePx}}px;
+            text-align: left;
+        }
+
+        .metadata-table thead th {
+            background-color: #333; /* Dark gray background */
+            color: #fff; /* White text */
+            font-weight: bold;
+            padding: 12px;
+            border: 1px solid #444; /* Slightly lighter border for contrast */
+        }
+
+        .metadata-table tbody td {
+            padding: 12px;
+            border: 1px solid #ddd; /* Light gray border */
+            color: #000; /* Black text */
+        }
+
+        .metadata-table tbody td:nth-child(even) {
+            background-color: #f9f9f9; /* Slightly off-white */
+        }
+    </style>
+</head>
+<body>
+
+{% macro INSERT_GROUP_CELL(figure, row_index, col_index) -%}
+    <td class="non-page-breaking">
+        {% set group = getGroup(figure.figureId, row_index, col_index) %}
+        {% set needsHorizontalSpacer = group.isHidden and hasAnyGroupInColumn(figure.figureId, col_index) %}
+        {% set needsVerticalSpacer = group.isHidden and hasAnyGroupInRow(figure.figureId, row_index) %}
+
+        {% if not group.isHidden %}
+        <table class="group-table" style="background-color: {{ group.groupColor }}; border-color: {{ group.groupBorderColor }}; ">
+        {% else %}
+        <table>
+        {% endif %}
+            {% if needsVerticalSpacer %}
+                <tr>
+                    {% if needsHorizontalSpacer %}
+                        <td>
+                            <div class="group-spacer-horizontal"></div>
+                        </td>
+                    {% endif %}
+                    <td>
+                        <div class="group-spacer-vertical"></div>
+                    </td>
+                </tr>
+            {% endif %}
+
+            {% if not group.isHidden %}
+                <tr>
+                    {% if needsHorizontalSpacer %}
+                       <td>
+                           <div class="group-spacer-horizontal"></div>
+                       </td>
+                    {% endif %}
+                    <td>
+                        <div class="group-title">{{ group.groupName }}</div>
+                    </td>
+                </tr>
+            {% endif %}
+
+            <tr>
+                {% if needsHorizontalSpacer %}
+                    <td>
+                        <div class="group-spacer-horizontal"></div>
+                    </td>
+                {% endif %}
+                <td>
+                    <!-- insert group elements -->
+
+                    <table class="plot-table">
+
+                        {% if group.isHorizontal %}
+                        <tr>
+                        {% endif %}
+
+                        {% for plot_index in range(group.numCells) %}
+                            {% if not group.isHorizontal %}
+                                <tr>
+                            {% endif %}
+                            <td>
+                            {% set plot = getPlot(group.groupId, plot_index) %}
+                            {% if plot.hasImageData %}
+                            {% if not group.isHidden %}
+                            <div class="plot">
+                            {% else %}
+                            <div class="plot" style="border-color: transparent;">
+                            {% endif %}
+                                <span class="cell-text truncate-text" style="width: {{ plot.width }}px;">{{ plot.title }}</span>
+                                <img class="plot-image" src="{{ plot.imageData }}" style="width: {{ plot.width }}px;" >
+                            </div>
+                            {% endif %}
+                            </td>
+                            {% if not group.isHorizontal %}
+                                </tr>
+                            {% endif %}
+
+                            {% if plot_index+1 < group.numCells %}
+                                {% if group.isHorizontal %}
+                                    <td><div class="plot-table-spacer"></div></td>
+                                {% else %}
+                                    <tr><td><div class="plot-table-spacer"></div></td></tr>
+                                {% endif %}
+                            {% endif %}
+                        {% endfor %}
+
+                        {% if group.isHorizontal %}
+                        </tr>
+                        {% endif %}
+
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </td>
+{%- endmacro %}
+
+    <main>
+    {% if exportType == "WithHeaderAndFooter" %}
+    <h1>
+    {{ reportTitle }}
+    </h1>
+    {% elif exportType == "Plain" %}
+    {% endif %}
+
+{% for figure in figures %}
+
+    {% if figure.pageBreakBeforeThisFigure %}
+        <div class="break"></div>
+    {% endif %}
+
+    <div>
+    {% if includeTitles %}
+    <h2>{{ figure.caption }}</h2>
+    {% endif %}
+
+    {% if figure.isGridPlot %}
+
+        {% if figure.asGridPlot.isWellplateTable %}
+        <div class = "non-page-breaking">
+        {% endif %}
+
+        <table class="figure-table">
+            <thead>
+            {% for column_header_index in range(figure.asGridPlot.numColumnHeaderLevels) %}
+            {% set column_headers = getColumnHeadersForLevel(figure.figureId, column_header_index) %}
+            <tr>
+                {% for row in range(figure.asGridPlot.numRowHeaderLevels) %}
+                <th></th> <!-- Alignment for row headers -->
+                {% endfor %}
+                {% for header in column_headers %}
+                <th class="header-cell header-cell-column" style="background-color: {{ header.background }}; border-color: {{ header.stroke }}; color: {{ header.font }};" colspan="{{ header.span }}">{{ header.caption }}</th>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+            </thead>
+
+                <tbody>
+
+                {% for row_index in range(figure.asGridPlot.numRows) %}
+                    <tr>
+                    {% set row_headers = getRowHeadersForRow(figure.figureId, row_index) %}
+                    {% for header in row_headers %}
+                        {% if header.span > 1 %}
+                            <th class="header-cell row-header" style="background-color: {{ header.background }}; border-color: {{ header.stroke }}; color: {{ header.font }};" rowspan="{{ header.span }}" scope="rowgroup">
+                        {% else %}
+                            <th class="header-cell row-header" style="background-color: {{ header.background }}; border-color: {{ header.stroke }}; color: {{ header.font }};" scope="row">
+                        {% endif %}
+                                <div class="row-header-absolute-div">
+                                    <div class="row-header-relative-div">
+                                        {{ header.caption }}
+                                    </div>
+                                </div>
+                            </th>
+                    {% endfor %}
+
+                    {% for col_index in range(figure.asGridPlot.numCols) %}
+                       {{ INSERT_GROUP_CELL(figure, row_index, col_index) }}
+                    {% endfor %}
+                    </tr>
+                {% endfor %}
+
+              </tbody>
+            </table>
+
+            {% if includeDescriptions %}
+            <div class="tag-figure-description">
+                {{ figure.asGridPlot.figureDescription }}
+            </div>
+            {% endif %}
+
+            {% if figure.asGridPlot.isWellplateTable %}
+            </div>
+            {% endif %}
+
+        {% elif figure.isReportDescription %}
+            <div class="group">
+                <div>
+                    {{ figure.asReportDescription.description }}
+                </div>
+            </div>
+        {% elif figure.isTextTable %}
+            <table class="{{ figure.asTextTable.tableStyleClass }}">
+                <thead>
+                    <tr>
+                        {% for column in range(figure.asTextTable.columnCount) %}
+                            <th>{{ getTableHeader(figure.figureId, column) }}</th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in range(figure.asTextTable.rowCount) %}
+                        <tr>
+                            {% for column in range(figure.asTextTable.columnCount) %}
+                                <td> {{ getTableData(figure.figureId, row, column) }} </td>
+                            {% endfor %}
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+
+        {% endif %}
+        </div>
+    {% endfor %}
+    </main>
+</body>
+</html>

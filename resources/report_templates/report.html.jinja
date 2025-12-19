@@ -1,0 +1,65 @@
+<html>
+<head>
+    <style>
+        @font-face {
+            font-family: mxwbio-regular;
+            src: url('{{basePath}}/fonts/SourceSansPro-Regular.otf') format('opentype');
+        }
+        div {
+            text-align: center;
+        }
+        @page {
+            size: A4;
+        }
+        @page {
+            @top-left {
+                content: url("{{basePath}}/images/Mini_MW.png");
+            }
+            @bottom-center {
+                font-family: mxwbio-regular;
+                content: "Page " counter(page) " of " counter(pages);
+            }
+        }
+        img {
+            width: 100%;
+            max-width: 200px;
+        }
+        table {
+            width: 100%;
+            page-break-inside: avoid;
+        }
+        h1 {
+            text-align: center;
+        }
+        body {
+            font-family: mxwbio-regular;
+        }
+    </style>
+    <title>{{Title}}</title>
+</head>
+<body>
+    <div class="pagebreak"></div>
+
+    <h1>{{AnalysisName}}<br/>{{PlotName}}</h1>
+
+    {% for assay in assays %}
+    <h2>{{assay.AssayName}}<br/>Project: {{assay.ProjectName}}<br/>Plate ID: {{assay.PlateId}}<br/>Recording Date: {{assay.RecordingDate}}<br/></h2>
+    <table>
+        {% for row in range(assay.rows) %}
+        <tr>
+            {% for column in range(assay.columns) %}
+            <td>
+                {% if hasData(assayId=assay.id, row=row, column=column) %}
+                <div>
+                    <img src="{{ plotData(assayId=assay.id, row=row, column=column) }}" />
+                </div>
+                <div>Well #{{ wellId(assayId=assay.id, row=row, column=column) }}</div>
+                {% endif %}
+            </td>
+            {% endfor %}
+        </tr>
+        {% endfor %}
+    </table>
+    {% endfor %}
+</body>
+</html>

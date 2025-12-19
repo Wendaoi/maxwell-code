@@ -1,0 +1,98 @@
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>MaxLab Live Report</title>
+    <style>
+        @page {
+            width: {{pageWidth}}px;
+            height: {{pageHeight}}px;
+
+            margin: 0px;
+
+            @top-left {
+                content: element(header);
+            }
+        }
+
+        header {
+            position: fixed;
+            top: 0;
+            left: 0;
+
+            height: 250px;
+            font-size: {{headerFontSizePx}}px;
+            font-weight: bold;
+            width: 100%;
+            background-color: white;
+            {% if debugMode  %}
+            border: 5px dotted #3a58de;
+            {% endif %}
+        }
+
+        @media print {
+            .page {
+                page-break-after: always;
+            }
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            {% if debugMode  %}
+            border: 5px dotted #ec5f42;
+            {% endif %}
+
+            margin-left: {{bodyMarginLeftPx}}px;
+            margin-right: {{bodyMarginRightPx}}px;
+        }
+
+        div.break {
+            page-break-before: always;
+        }
+
+        td {
+            vertical-align: top;
+            padding: 0px;
+        }
+
+        thead {
+            display: table-header-group;
+        }
+
+        .plot-container {
+            display: flex;
+            justify-content: space-between;
+            width: 100%;
+        }
+
+        .header-logo {
+            max-width: 125px;
+            height: auto;
+            margin-left: 250px;
+            margin-right: 250px;
+            margin-top: 70px;
+        }
+
+        .header-title {
+            font-family: 'Arial', sans-serif;
+            font-weight: bold;
+            font-size: 20px;
+            margin-left: 250px;
+            margin-top: 75px;
+            vertical-align: middle
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div class="header-content">
+            <div class="plot-container">
+                <img class="header-logo right" src="{{ miniMxw }}" />
+                <img class="header-logo right" src="{{ scopeLogo }}" />
+            </div>
+        </div>
+    </header>
+</body>
+
+</html>
