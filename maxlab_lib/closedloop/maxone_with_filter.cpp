@@ -6,35 +6,40 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 #include <thread>
 #include <vector>
 
 #include "gamewindow.h"
 #include "maxlab/maxlab.h"
 #include "spike_detection.h"
-#include "ponggame.h"
+#include "threads/ponggame.h"
 
 #ifdef USE_QT
 #include <QApplication>
 #include <QMetaObject>
 #endif
 
-using SteadyClock = std::chrono::steady_clock;
+using clock = std::chrono::steady_clock;
 
 static std::atomic<bool> g_running{true};
 
-static const std::array<const char*, 8> kSequenceByZone = { // 0..7 from PongGame::getSensoryStimZone()
-    "sequence0",
-    "sequence1",
-    "sequence2",
-    "sequence3",
-    "sequence4",
-    "sequence5",
-    "sequence6",
-    "sequence7",
+static constexpr float kGameWidth = 640.0f;
+static constexpr float kGameHeight = 480.0f;
+
+static const std::array<const char*, 8> kStimPositions = {
+    "pos0",
+    "pos1",
+    "pos2",
+    "pos3",
+    "pos4",
+    "pos5",
+    "pos6",
+    "pos7",
 };
-static const char* kSequenceOnHit = "sequence_hit";
-static const char* kSequenceOnMiss = "sequence_miss";
+static const std::array<int, 10> kStimFrequencies = {4, 8, 12, 16, 20, 24, 28, 32, 36, 40};
+static const char* kSequenceOnHit = "hit_feedback";
+static const char* kSequenceOnMiss = "miss_feedback";
 
 struct RunConfig {
     uint8_t target_well = 0;
@@ -47,7 +52,7 @@ struct RunConfig {
 
 struct AppState {
     AppState(const RunConfig& config, GameWindow* ui_window)
-        : window_start(SteadyClock::now()),
+        : window_start(clock::now()),
           window_len(std::chrono::milliseconds(config.window_ms)),
           blanking(0),
           blanking_frames_after_trigger(config.blanking_frames_after_trigger),
@@ -57,7 +62,7 @@ struct AppState {
         spike_counts.resize(config.channel_count, 0);
     }
 
-    SteadyClock::time_point window_start;
+    clock::time_point window_start;
     std::chrono::milliseconds window_len;
     uint64_t blanking;
     uint64_t blanking_frames_after_trigger;
@@ -71,7 +76,7 @@ static void on_sigint(int) {
     g_running = false;
 }
 
-static void reset_window(AppState& state, SteadyClock::time_point now) {
+static void reset_window(AppState& state, clock::time_point now) {
     state.window_start = now;
     state.detector.resetCounts();
 }
@@ -85,7 +90,7 @@ static int channel_to_quarter(std::size_t channel, std::size_t channel_count) {
     return q;
 }
 
-static void handle_window(AppState& state, SteadyClock::time_point now) {
+static void handle_window(AppState& state, clock::time_point now) {
     state.detector.getCounts(&state.spike_counts);
 
     std::array<uint64_t, 4> quarter_counts{0, 0, 0, 0};
@@ -101,9 +106,22 @@ static void handle_window(AppState& state, SteadyClock::time_point now) {
 
     GameEvent event = state.pong_game.update(static_cast<int>(sum_up), static_cast<int>(sum_down));
     if (event == GameEvent::None) {
-        const int zone = state.pong_game.getSensoryStimZone();
-        if (zone >= 0 && zone < static_cast<int>(kSequenceByZone.size())) {
-            maxlab::verifyStatus(maxlab::sendSequence(kSequenceByZone[static_cast<std::size_t>(zone)]));
+        if (state.pong_game.getCondition() != ExperimentCondition::Rest) {
+            const float ball_x = static_cast<float>(state.pong_game.getBallX());
+            const float ball_y = static_cast<float>(state.pong_game.getBallY());
+            const float norm_x = std::clamp(ball_x / kGameWidth, 0.0f, 1.0f);
+            const float norm_y = std::clamp(ball_y / kGameHeight, 0.0f, 1.0f);
+
+            int pos_idx = static_cast<int>(norm_y * 7.99f);
+            int freq_idx = static_cast<int>((1.0f - norm_x) * 9.99f);
+            pos_idx = std::clamp(pos_idx, 0, static_cast<int>(kStimPositions.size() - 1));
+            freq_idx = std::clamp(freq_idx, 0, static_cast<int>(kStimFrequencies.size() - 1));
+
+            const std::size_t pos_index = static_cast<std::size_t>(pos_idx);
+            const std::size_t freq_index = static_cast<std::size_t>(freq_idx);
+            std::string seq_name = std::string(kStimPositions[pos_index]) + "_" +
+                                   std::to_string(kStimFrequencies[freq_index]) + "hz";
+            maxlab::verifyStatus(maxlab::sendSequence(seq_name.c_str()));
         }
     } else if (event == GameEvent::BallHitPlayerPaddle) {
         if (state.blanking == 0) {
@@ -162,7 +180,7 @@ static int run_game_loop(const RunConfig& config, GameWindow* window) {
             const maxlab::Status status = maxlab::DataStreamerFiltered_receiveNextFrame(&frame_data);
 
             if (status == maxlab::Status::MAXLAB_NO_FRAME) {
-                auto now = SteadyClock::now();
+                auto now = clock::now();
                 if (now - state.window_start >= state.window_len) {
                     handle_window(state, now);
                 }
@@ -188,7 +206,7 @@ static int run_game_loop(const RunConfig& config, GameWindow* window) {
                 }
             }
 
-            auto now = SteadyClock::now();
+            auto now = clock::now();
             if (now - state.window_start >= state.window_len) {
                 handle_window(state, now);
             }
