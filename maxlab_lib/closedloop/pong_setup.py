@@ -398,35 +398,75 @@ def create_biphasic_pulse(
     return seq
 
 
-def prepare_ball_position_sequence() -> mx.Sequence:
-    """Prepare a single pulse for ball position feedback
+def prepare_ball_position_sequences() -> Dict[str, mx.Sequence]:
+    """Prepare multiple ball position feedback sequences at different frequencies
     
-    This sequence represents ONE pulse at a given position.
-    The C++ module will trigger this at varying frequencies.
+    Creates discrete sequences from 4Hz to 40Hz in 4Hz steps.
+    The C++ module will select the appropriate sequence based on ball distance.
+    
+    Frequency mapping:
+    - 4Hz: Ball very far from paddle
+    - 8Hz: Ball far
+    - 12Hz: Ball moderately far
+    - 16Hz: Ball moderate distance
+    - 20Hz: Ball moderately close
+    - 24Hz: Ball close
+    - 28Hz: Ball very close
+    - 32Hz: Ball extremely close
+    - 36Hz: Ball approaching
+    - 40Hz: Ball about to hit
     
     Returns
     -------
-    mx.Sequence
-        Single biphasic pulse sequence
+    Dict[str, mx.Sequence]
+        Dictionary mapping frequency to sequence
+        Keys: "ball_4hz", "ball_8hz", ..., "ball_40hz"
     """
-    print_substep("Preparing ball position feedback sequence...")
+    print_substep("Preparing ball position feedback sequences...")
     
-    seq = mx.Sequence()
     params = STIM_PARAMS["ball_position"]
+    sequences = {}
     
-    create_biphasic_pulse(
-        seq,
-        amplitude_mV=params["amplitude_mV"],
-        phase_us=params["phase_us"],
-        event_label="ball_position_pulse"
-    )
+    # Generate sequences from 4Hz to 40Hz in 4Hz steps
+    frequencies = range(4, 44, 4)  # 4, 8, 12, ..., 40
     
-    print_success("Ball position sequence ready")
+    print_info(f"Generating {len(frequencies)} discrete frequency sequences...")
+    
+    for freq_hz in frequencies:
+        seq = mx.Sequence()
+        
+        # Create a 1-second burst at this frequency
+        # This gives the C++ module a repeatable pattern
+        num_pulses = freq_hz  # For 1 second of stimulation
+        
+        # Inter-pulse interval in samples (20kHz sampling rate)
+        # For X Hz, interval = 20000/X samples
+        interval_samples = int(20000 / freq_hz)
+        
+        for pulse_idx in range(num_pulses):
+            create_biphasic_pulse(
+                seq,
+                amplitude_mV=params["amplitude_mV"],
+                phase_us=params["phase_us"],
+                event_label=f"ball_{freq_hz}hz_pulse_{pulse_idx+1}"
+            )
+            
+            # Add inter-pulse delay (except after last pulse)
+            if pulse_idx < num_pulses - 1:
+                seq.append(mx.DelaySamples(interval_samples))
+        
+        # Store sequence with descriptive key
+        seq_key = f"ball_{freq_hz}hz"
+        sequences[seq_key] = seq
+        
+        print_success(f"Sequence {freq_hz}Hz ready ({num_pulses} pulses)")
+    
+    print_success(f"All {len(sequences)} ball position sequences ready")
+    print_info(f"Frequency range: 4-40Hz in 4Hz steps")
     print_info(f"Amplitude: {params['amplitude_mV']}mV")
     print_info(f"Phase width: {params['phase_us']}µs")
-    print_info(f"Frequency range: {params['frequency_min_Hz']}-{params['frequency_max_Hz']}Hz")
     
-    return seq
+    return sequences
 
 
 def prepare_hit_feedback_sequence() -> mx.Sequence:
@@ -532,15 +572,28 @@ def prepare_all_sequences() -> Dict[str, mx.Sequence]:
     """
     print_step_header(8, "PREPARING STIMULATION SEQUENCES")
     
-    print_info("Preparing 3 sequence types for C++ module")
+    print_info("Preparing multiple sequence types for C++ module")
     
-    sequences = {
-        "ball_position": prepare_ball_position_sequence(),
-        "hit_feedback": prepare_hit_feedback_sequence(),
-        "miss_feedback": prepare_miss_feedback_sequence(),
-    }
+    # Get ball position sequences (multiple frequencies)
+    ball_sequences = prepare_ball_position_sequences()
     
-    print_success("All stimulation sequences prepared successfully")
+    # Prepare feedback sequences
+    print_substep("Preparing hit feedback sequence...")
+    hit_sequence = prepare_hit_feedback_sequence()
+    
+    print_substep("Preparing miss feedback sequence...")
+    miss_sequence = prepare_miss_feedback_sequence()
+    
+    # Combine all sequences into one dictionary
+    sequences = ball_sequences.copy()
+    sequences["hit_feedback"] = hit_sequence
+    sequences["miss_feedback"] = miss_sequence
+    
+    print_success(f"All stimulation sequences prepared successfully")
+    print_info(f"Total sequences: {len(sequences)}")
+    print_info(f"  - Ball position: {len(ball_sequences)} frequencies (4-40Hz)")
+    print_info(f"  - Hit feedback: 1 sequence")
+    print_info(f"  - Miss feedback: 1 sequence")
     
     return sequences
 
@@ -647,6 +700,7 @@ def stop_recording(saving: mx.Saving) -> None:
 def export_cpp_config(
     array: mx.Array,
     stim_units: List[int],
+    sequences: Dict[str, mx.Sequence],  # 新增参数
     config_path: str
 ) -> Dict:
     """Export configuration for C++ closed-loop module
@@ -655,6 +709,7 @@ def export_cpp_config(
     - Which electrodes to monitor for spikes
     - Which stimulation units to control
     - Stimulation parameters
+    - Available stimulation sequences
     
     Parameters
     ----------
@@ -662,6 +717,8 @@ def export_cpp_config(
         Configured array
     stim_units : List[int]
         List of stimulation unit indices
+    sequences : Dict[str, mx.Sequence]
+        Dictionary of prepared sequences
     config_path : str
         Path to save JSON config
         
@@ -696,6 +753,10 @@ def export_cpp_config(
     
     print_substep("Building configuration structure...")
     
+    # Extract ball position sequence names
+    ball_sequences = [k for k in sequences.keys() if k.startswith("ball_")]
+    ball_frequencies = sorted([int(k.split("_")[1].replace("hz", "")) for k in ball_sequences])
+    
     cpp_config = {
         "experiment": {
             "name": "pong_closed_loop",
@@ -722,11 +783,40 @@ def export_cpp_config(
         
         "stimulation_parameters": STIM_PARAMS,
         
+        # New: Sequence mapping for C++ module
+        "sequences": {
+            "ball_position": {
+                "available_frequencies": ball_frequencies,
+                "sequence_names": ball_sequences,
+                "mapping": {
+                    freq: f"ball_{freq}hz" 
+                    for freq in ball_frequencies
+                }
+            },
+            "hit_feedback": {
+                "sequence_name": "hit_feedback",
+                "trigger": "on_paddle_hit"
+            },
+            "miss_feedback": {
+                "sequence_name": "miss_feedback",
+                "trigger": "on_ball_miss"
+            }
+        },
+        
         "game_parameters": {
             "ball_speed": 0.5,
             "paddle_speed": 1.0,
             "paddle_height": 0.2,
-            "update_rate_ms": 10
+            "update_rate_ms": 10,
+            
+            # Ball distance to frequency mapping
+            "distance_to_frequency": {
+                "description": "Map normalized ball distance [0,1] to stimulation frequency",
+                "min_frequency_hz": 4,
+                "max_frequency_hz": 40,
+                "step_hz": 4,
+                "formula": "freq = 4 * round((40 - 36 * distance) / 4)"
+            }
         },
         
         "spike_detection": {
@@ -754,10 +844,13 @@ def export_cpp_config(
     print_info(f"  - Motor 2 (paddle down): {motor_2_channels}")
     print_info(f"  - Stimulation: {stim_channels}")
     print_info(f"Stimulation units: {stim_units}")
+    print_info(f"Available ball sequences: {ball_sequences}")
     
     print_success("Configuration export complete")
     
     return cpp_config
+
+
 
 
 # ============================================================================
