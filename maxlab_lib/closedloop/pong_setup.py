@@ -5,14 +5,10 @@ pong_experiment_setup.py
 
 Complete setup script for the Pong closed-loop experiment with MaxLab system.
 
-This script performs:
-1. System initialization and calibration (Offset/Gain compensation)
-2. Electrode layout configuration (sensory + motor recording, sensory stimulation)
-3. Pre-configured stimulation sequences for C++ real-time module
-4. Recording control and data export
-5. Configuration export for C++ module integration
-
-The C++ module will handle real-time game logic and stimulation delivery.
+Modified to support fully decoupled position × frequency stimulation:
+- 8 stimulation positions (ball positions)
+- 10 stimulation frequencies (4-40Hz in 4Hz steps)
+- 80 pre-generated sequences with embedded unit configuration
 """
 
 import maxlab as mx
@@ -43,13 +39,15 @@ RECORDING_ELECTRODES = [
 # fmt: on
 
 # Functional electrode groups for Pong experiment
-# These will be subdivided from the recording pool
 SENSORY_RECORDING_ELECTRODES = RECORDING_ELECTRODES[0:8]   # 8 electrodes for ball position
 MOTOR_1_RECORDING_ELECTRODES = RECORDING_ELECTRODES[8:20]  # 12 electrodes for "paddle up"
 MOTOR_2_RECORDING_ELECTRODES = RECORDING_ELECTRODES[20:32] # 12 electrodes for "paddle down"
 
-# Stimulation electrodes (subset of sensory electrodes)
-# Must be carefully chosen to avoid routing conflicts
+# ============================================================================
+# STIMULATION POSITION CONFIGURATION (8 positions)
+# ============================================================================
+
+# 8 distinct stimulation positions corresponding to 8 ball vertical positions
 SENSORY_STIM_ELECTRODES = [
     RECORDING_ELECTRODES[0],  # Position 0 (top)
     RECORDING_ELECTRODES[1],  # Position 1
@@ -61,6 +59,18 @@ SENSORY_STIM_ELECTRODES = [
     RECORDING_ELECTRODES[7],  # Position 7 (bottom)
 ]
 
+# Position names for semantic mapping
+POSITION_NAMES = [
+    "pos0",
+    "pos1",
+    "pos2",
+    "pos3",
+    "pos4",
+    "pos5",
+    "pos6",
+    "pos7"
+]
+
 # ============================================================================
 # GLOBAL CONFIGURATION
 # ============================================================================
@@ -68,22 +78,21 @@ SENSORY_STIM_ELECTRODES = [
 RECORDING_DIR = str(Path.home() / "pong_experiments")
 Path(RECORDING_DIR).mkdir(parents=True, exist_ok=True)
 
-# Stimulation parameters for different game events
+# Stimulation parameters
 STIM_PARAMS = {
     "ball_position": {
-        "amplitude_mV": 50,          # Sensory feedback for ball position
-        "phase_us": 200,             # Biphasic pulse width
-        "frequency_min_Hz": 4,       # When ball is far
-        "frequency_max_Hz": 40,      # When ball is close
+        "amplitude_mV": 50,
+        "phase_us": 200,
+        "frequencies_Hz": [4, 8, 12, 16, 20, 24, 28, 32, 36, 40],  # 10 frequencies
     },
     "hit_feedback": {
-        "amplitude_mV": 75,          # Positive feedback on paddle hit
+        "amplitude_mV": 75,
         "phase_us": 200,
         "burst_frequency_Hz": 100,
         "burst_duration_ms": 100,
     },
     "miss_feedback": {
-        "amplitude_mV": 150,         # Aversive feedback on miss
+        "amplitude_mV": 150,
         "phase_us": 200,
         "burst_frequency_Hz": 5,
         "burst_duration_ms": 4000,
@@ -130,15 +139,11 @@ def print_error(message: str, indent: int = 2) -> None:
 
 
 # ============================================================================
-# SYSTEM INITIALIZATION (Reusing from stimulate.py)
+# SYSTEM INITIALIZATION
 # ============================================================================
 
 def initialize_system() -> None:
-    """Initialize system into a defined state
-    
-    Reused from stimulate.py example.
-    Powers on stimulation units and ensures clean state.
-    """
+    """Initialize system into a defined state"""
     print_step_header(1, "INITIALIZING MAXLAB SYSTEM")
     
     print_substep("Connecting to MaxLab server...")
@@ -163,30 +168,15 @@ def initialize_system() -> None:
 
 
 # ============================================================================
-# ARRAY CONFIGURATION (Reusing from stimulate.py)
+# ARRAY CONFIGURATION
 # ============================================================================
 
 def configure_array(electrodes: List[int], stim_electrodes: List[int]) -> mx.Array:
-    """Configure array with recording and stimulation electrodes
-    
-    Reused from stimulate.py example.
-    
-    Parameters
-    ----------
-    electrodes : List[int]
-        Recording electrodes
-    stim_electrodes : List[int]
-        Stimulation electrodes
-        
-    Returns
-    -------
-    mx.Array
-        Configured array (not yet downloaded to hardware)
-    """
+    """Configure array with recording and stimulation electrodes"""
     print_step_header(2, "CONFIGURING ELECTRODE ARRAY")
     
     print_info(f"Total recording electrodes: {len(electrodes)}")
-    print_info(f"Stimulation electrodes: {len(stim_electrodes)}")
+    print_info(f"Stimulation positions: {len(stim_electrodes)}")
     print_info(f"Sensory recording: {len(SENSORY_RECORDING_ELECTRODES)} electrodes")
     print_info(f"Motor 1 recording: {len(MOTOR_1_RECORDING_ELECTRODES)} electrodes")
     print_info(f"Motor 2 recording: {len(MOTOR_2_RECORDING_ELECTRODES)} electrodes")
@@ -240,19 +230,24 @@ def configure_array(electrodes: List[int], stim_electrodes: List[int]) -> mx.Arr
 
 def connect_stim_units_to_stim_electrodes(
     stim_electrodes: List[int], array: mx.Array
-) -> List[int]:
-    """Connect stimulation units to electrodes
+) -> Dict[int, int]:
+    """Connect stimulation units to electrodes and return electrode->unit mapping
     
-    Reused from stimulate.py example with added validation.
+    Returns
+    -------
+    Dict[int, int]
+        Mapping from electrode ID to stimulation unit ID
     """
     print_step_header(3, "CONNECTING STIMULATION UNITS")
     
-    print_info(f"Attempting to connect {len(stim_electrodes)} electrodes to stimulation units")
+    print_info(f"Connecting {len(stim_electrodes)} positions to stimulation units")
     
-    stim_units: List[int] = []
+    electrode_to_unit: Dict[int, int] = {}
+    used_units: List[int] = []
     
     for idx, stim_el in enumerate(stim_electrodes, 1):
-        print_substep(f"Connecting electrode {stim_el} ({idx}/{len(stim_electrodes)})...")
+        position_name = POSITION_NAMES[idx - 1]
+        print_substep(f"Connecting {position_name} (electrode {stim_el})...")
         
         try:
             array.connect_electrode_to_stimulation(stim_el)
@@ -267,32 +262,29 @@ def connect_stim_units_to_stim_electrodes(
             
             stim_unit_int = int(stim)
             
-            if stim_unit_int in stim_units:
+            if stim_unit_int in used_units:
                 print_error(f"Electrode {stim_el} conflicts with existing connection")
                 raise RuntimeError(
                     f"Two electrodes connected to the same stim unit {stim_unit_int}.\n"
                     f"This is not allowed. Please select a neighboring electrode of {stim_el}!"
                 )
             else:
-                stim_units.append(stim_unit_int)
-                print_success(f"Electrode {stim_el} → Stim Unit {stim_unit_int}")
+                electrode_to_unit[stim_el] = stim_unit_int
+                used_units.append(stim_unit_int)
+                print_success(f"{position_name}: Electrode {stim_el} → Unit {stim_unit_int}")
         
         except Exception as e:
             print_error(f"Connection failed: {str(e)}")
             raise
     
-    print_success(f"All {len(stim_units)} stimulation units connected successfully")
-    print_info(f"Stimulation unit IDs: {stim_units}")
+    print_success(f"All {len(electrode_to_unit)} stimulation units connected")
+    print_info(f"Electrode->Unit mapping: {electrode_to_unit}")
     
-    return stim_units
+    return electrode_to_unit
 
 
 def configure_and_powerup_stim_units(stim_units: List[int]) -> None:
-    """Power up and configure stimulation units
-    
-    Reused from stimulate.py example.
-    All units use DAC source 0 for synchronized control.
-    """
+    """Power up and configure all stimulation units"""
     print_step_header(6, "POWERING UP STIMULATION UNITS")
     
     print_info(f"Configuring {len(stim_units)} stimulation units")
@@ -307,38 +299,23 @@ def configure_and_powerup_stim_units(stim_units: List[int]) -> None:
                 .power_up(True)
                 .connect(True)
                 .set_voltage_mode()
-                .dac_source(0)  # All use DAC 0 for C++ control
+                .dac_source(0)
             )
             mx.send(stim)
-            print_success(f"Stim Unit {stim_unit} powered up and ready")
+            print_success(f"Unit {stim_unit} ready")
         except Exception as e:
             print_error(f"Failed to power up unit {stim_unit}: {str(e)}")
             raise
     
-    print_success("All stimulation units powered up successfully")
+    print_success("All stimulation units powered up")
 
 
 # ============================================================================
-# STIMULATION SEQUENCE PREPARATION
+# STIMULATION SEQUENCE PREPARATION (DECOUPLED ARCHITECTURE)
 # ============================================================================
 
 def amplitude_mV_to_DAC_bits(amplitude_mV: float) -> int:
-    """Convert mV to DAC bits
-    
-    DAC range: 0-1023 bits
-    512 bits = 0V
-    Inverting amplifier: 512 - bits = positive voltage
-    
-    Parameters
-    ----------
-    amplitude_mV : float
-        Desired amplitude in millivolts
-        
-    Returns
-    -------
-    int
-        DAC bit value
-    """
+    """Convert mV to DAC bits"""
     dac_lsb_mV = float(mx.query_DAC_lsb_mV())
     
     if abs(amplitude_mV) > 1000.0:
@@ -353,33 +330,12 @@ def create_biphasic_pulse(
     phase_us: int,
     event_label: str = ""
 ) -> mx.Sequence:
-    """Create a single biphasic stimulation pulse
-    
-    Parameters
-    ----------
-    seq : mx.Sequence
-        Sequence to append to
-    amplitude_mV : float
-        Pulse amplitude in millivolts
-    phase_us : int
-        Duration of each phase in microseconds
-    event_label : str
-        Optional label for event tracking
-        
-    Returns
-    -------
-    mx.Sequence
-        Updated sequence
-    """
+    """Create a single biphasic stimulation pulse"""
     global event_counter
     
-    # Calculate phase duration in samples (50us per sample)
     phase_samples = int(phase_us / 50)
-    
-    # Convert amplitude to DAC bits
     amplitude_bits = amplitude_mV_to_DAC_bits(amplitude_mV)
     
-    # Add event marker if label provided
     if event_label:
         event_counter += 1
         seq.append(mx.Event(0, 1, event_counter, event_label))
@@ -398,71 +354,130 @@ def create_biphasic_pulse(
     return seq
 
 
-def prepare_ball_position_sequences() -> Dict[str, mx.Sequence]:
-    """Prepare multiple ball position feedback sequences at different frequencies
+def create_unit_configuration_commands(
+    target_unit_id: int,
+    all_unit_ids: List[int]
+) -> List:
+    """Generate commands to activate only the target stimulation unit
     
-    Creates discrete sequences from 4Hz to 40Hz in 4Hz steps.
-    The C++ module will select the appropriate sequence based on ball distance.
+    This ensures the sequence only stimulates at the desired position.
     
-    Frequency mapping:
-    - 4Hz: Ball very far from paddle
-    - 8Hz: Ball far
-    - 12Hz: Ball moderately far
-    - 16Hz: Ball moderate distance
-    - 20Hz: Ball moderately close
-    - 24Hz: Ball close
-    - 28Hz: Ball very close
-    - 32Hz: Ball extremely close
-    - 36Hz: Ball approaching
-    - 40Hz: Ball about to hit
+    Parameters
+    ----------
+    target_unit_id : int
+        The stimulation unit to activate
+    all_unit_ids : List[int]
+        All available stimulation unit IDs
+        
+    Returns
+    -------
+    List
+        List of mx.StimulationUnit configuration commands
+    """
+    commands = []
     
+    # Disconnect all units first
+    for unit_id in all_unit_ids:
+        commands.append(
+            mx.StimulationUnit(unit_id).connect(False)
+        )
+    
+    # Connect and activate only the target unit
+    commands.append(
+        mx.StimulationUnit(target_unit_id)
+        .connect(True)
+        .power_up(True)
+    )
+    
+    return commands
+
+
+def prepare_decoupled_ball_sequences(
+    electrode_to_unit: Dict[int, int]
+) -> Dict[str, mx.Sequence]:
+    """Prepare all position × frequency combinations (80 sequences)
+    
+    Each sequence contains:
+    1. Unit configuration (activate target position, deactivate others)
+    2. Stimulation pulses at specified frequency
+    
+    Parameters
+    ----------
+    electrode_to_unit : Dict[int, int]
+        Mapping from electrode ID to stimulation unit ID
+        
     Returns
     -------
     Dict[str, mx.Sequence]
-        Dictionary mapping frequency to sequence
-        Keys: "ball_4hz", "ball_8hz", ..., "ball_40hz"
+        Dictionary mapping sequence names to sequence objects
+        Keys: "pos0_top_4hz", "pos0_top_8hz", ..., "pos7_bottom_40hz"
     """
-    print_substep("Preparing ball position feedback sequences...")
+    print_step_header(8, "PREPARING DECOUPLED POSITION × FREQUENCY SEQUENCES")
     
     params = STIM_PARAMS["ball_position"]
+    frequencies = params["frequencies_Hz"]
+    
+    total_sequences = len(SENSORY_STIM_ELECTRODES) * len(frequencies)
+    print_info(f"Generating {total_sequences} sequences:")
+    print_info(f"  - {len(SENSORY_STIM_ELECTRODES)} positions × {len(frequencies)} frequencies")
+    
     sequences = {}
+    all_unit_ids = list(electrode_to_unit.values())
     
-    # Generate sequences from 4Hz to 40Hz in 4Hz steps
-    frequencies = range(4, 44, 4)  # 4, 8, 12, ..., 40
+    sequence_count = 0
     
-    print_info(f"Generating {len(frequencies)} discrete frequency sequences...")
-    
-    for freq_hz in frequencies:
-        seq = mx.Sequence()
+    for pos_idx, (electrode, position_name) in enumerate(zip(SENSORY_STIM_ELECTRODES, POSITION_NAMES)):
+        target_unit = electrode_to_unit[electrode]
         
-        # Create a 1-second burst at this frequency
-        # This gives the C++ module a repeatable pattern
-        num_pulses = freq_hz  # For 1 second of stimulation
+        print_substep(f"Generating sequences for {position_name} (unit {target_unit})...")
         
-        # Inter-pulse interval in samples (20kHz sampling rate)
-        # For X Hz, interval = 20000/X samples
-        interval_samples = int(20000 / freq_hz)
-        
-        for pulse_idx in range(num_pulses):
-            create_biphasic_pulse(
-                seq,
-                amplitude_mV=params["amplitude_mV"],
-                phase_us=params["phase_us"],
-                event_label=f"ball_{freq_hz}hz_pulse_{pulse_idx+1}"
+        for freq_hz in frequencies:
+            sequence_count += 1
+            
+            # Create unique sequence name
+            seq_name = f"{position_name}_{freq_hz}hz"
+            
+            # Create persistent sequence
+            seq = mx.Sequence(name=seq_name, persistent=True)
+            
+            # Step 1: Configure stimulation unit routing
+            # Deactivate all other units, activate only this position
+            unit_config_commands = create_unit_configuration_commands(
+                target_unit_id=target_unit,
+                all_unit_ids=all_unit_ids
             )
             
-            # Add inter-pulse delay (except after last pulse)
-            if pulse_idx < num_pulses - 1:
-                seq.append(mx.DelaySamples(interval_samples))
-        
-        # Store sequence with descriptive key
-        seq_key = f"ball_{freq_hz}hz"
-        sequences[seq_key] = seq
-        
-        print_success(f"Sequence {freq_hz}Hz ready ({num_pulses} pulses)")
+            for cmd in unit_config_commands:
+                seq.append(cmd)
+            
+            # Add small delay to ensure routing takes effect
+            seq.append(mx.DelaySamples(100))  # 5ms
+            
+            # Step 2: Generate stimulation pulses
+            num_pulses = freq_hz  # 1 second burst
+            interval_samples = int(20000 / freq_hz)
+            
+            for pulse_idx in range(num_pulses):
+                create_biphasic_pulse(
+                    seq,
+                    amplitude_mV=params["amplitude_mV"],
+                    phase_us=params["phase_us"],
+                    event_label=f"{seq_name}_pulse_{pulse_idx+1}"
+                )
+                
+                if pulse_idx < num_pulses - 1:
+                    seq.append(mx.DelaySamples(interval_samples))
+            
+            # Send sequence to mxwserver
+            seq.send()
+            sequences[seq_name] = seq
+            
+            if sequence_count % 10 == 0:
+                print_info(f"Progress: {sequence_count}/{total_sequences} sequences generated")
     
-    print_success(f"All {len(sequences)} ball position sequences ready")
-    print_info(f"Frequency range: 4-40Hz in 4Hz steps")
+    print_success(f"All {len(sequences)} sequences generated and uploaded")
+    print_info(f"Sequence naming: <position>_<frequency>hz")
+    print_info(f"Example: pos0_20hz, pos3_40hz")
     print_info(f"Amplitude: {params['amplitude_mV']}mV")
     print_info(f"Phase width: {params['phase_us']}µs")
     
@@ -470,27 +485,16 @@ def prepare_ball_position_sequences() -> Dict[str, mx.Sequence]:
 
 
 def prepare_hit_feedback_sequence() -> mx.Sequence:
-    """Prepare burst sequence for successful paddle hit
-    
-    Short, high-frequency burst as positive reinforcement.
-    
-    Returns
-    -------
-    mx.Sequence
-        Burst stimulation sequence
-    """
+    """Prepare burst sequence for successful paddle hit"""
     print_substep("Preparing hit feedback sequence...")
     
-    seq = mx.Sequence()
+    seq = mx.Sequence(name="hit_feedback", persistent=True)
     params = STIM_PARAMS["hit_feedback"]
     
-    # Calculate number of pulses in burst
     burst_duration_ms = params["burst_duration_ms"]
     frequency_Hz = params["burst_frequency_Hz"]
     num_pulses = int((burst_duration_ms / 1000.0) * frequency_Hz)
-    
-    # Inter-pulse interval in samples
-    interval_samples = int(20000 / frequency_Hz)  # 20kHz sampling
+    interval_samples = int(20000 / frequency_Hz)
     
     print_info(f"Generating {num_pulses} pulses...")
     
@@ -503,41 +507,30 @@ def prepare_hit_feedback_sequence() -> mx.Sequence:
         )
         seq.append(mx.DelaySamples(interval_samples))
     
+    seq.send()
+    
     print_success("Hit feedback sequence ready")
     print_info(f"Burst: {num_pulses} pulses at {frequency_Hz}Hz")
-    print_info(f"Amplitude: {params['amplitude_mV']}mV")
-    print_info(f"Duration: {burst_duration_ms}ms")
     
     return seq
 
 
 def prepare_miss_feedback_sequence() -> mx.Sequence:
-    """Prepare unpredictable sequence for missed ball
-    
-    Long, low-frequency, irregular stimulation as negative feedback.
-    
-    Returns
-    -------
-    mx.Sequence
-        Aversive stimulation sequence
-    """
+    """Prepare unpredictable sequence for missed ball"""
     print_substep("Preparing miss feedback sequence...")
     
-    seq = mx.Sequence()
+    seq = mx.Sequence(name="miss_feedback", persistent=True)
     params = STIM_PARAMS["miss_feedback"]
     
-    # Calculate parameters
     burst_duration_ms = params["burst_duration_ms"]
     base_frequency_Hz = params["burst_frequency_Hz"]
     num_pulses = int((burst_duration_ms / 1000.0) * base_frequency_Hz)
     
     print_info(f"Generating {num_pulses} irregular pulses...")
     
-    # Add jitter to make it unpredictable
-    np.random.seed(42)  # Reproducible randomness
+    np.random.seed(42)
     
     for i in range(num_pulses):
-        # Random amplitude variation (±20%)
         amplitude = params["amplitude_mV"] * np.random.uniform(0.8, 1.2)
         
         create_biphasic_pulse(
@@ -547,53 +540,53 @@ def prepare_miss_feedback_sequence() -> mx.Sequence:
             event_label=f"miss_feedback_pulse_{i+1}"
         )
         
-        # Random inter-pulse interval (unpredictable timing)
         base_interval = int(20000 / base_frequency_Hz)
         jitter = int(base_interval * np.random.uniform(0.5, 1.5))
         seq.append(mx.DelaySamples(base_interval + jitter))
     
+    seq.send()
+    
     print_success("Miss feedback sequence ready")
-    print_info(f"Unpredictable burst: {num_pulses} pulses")
-    print_info(f"Amplitude: {params['amplitude_mV']}mV ± 20% jitter")
-    print_info(f"Duration: {burst_duration_ms}ms")
     
     return seq
 
 
-def prepare_all_sequences() -> Dict[str, mx.Sequence]:
+def prepare_all_sequences(
+    electrode_to_unit: Dict[int, int]
+) -> Dict[str, mx.Sequence]:
     """Prepare all stimulation sequences for the experiment
     
-    These sequences are pre-loaded and can be triggered by the C++ module.
-    
+    Parameters
+    ----------
+    electrode_to_unit : Dict[int, int]
+        Mapping from electrode ID to stimulation unit ID
+        
     Returns
     -------
     Dict[str, mx.Sequence]
-        Dictionary of named sequences
+        Dictionary of all named sequences (82 total)
     """
-    print_step_header(8, "PREPARING STIMULATION SEQUENCES")
+    print_step_header(8, "PREPARING ALL STIMULATION SEQUENCES")
     
-    print_info("Preparing multiple sequence types for C++ module")
+    print_info("Architecture: Fully decoupled position × frequency")
+    print_info(f"  - 8 positions × 10 frequencies = 80 ball sequences")
+    print_info(f"  - 2 feedback sequences (hit/miss)")
+    print_info(f"  - Total: 82 sequences")
     
-    # Get ball position sequences (multiple frequencies)
-    ball_sequences = prepare_ball_position_sequences()
+    # Prepare decoupled ball position sequences
+    ball_sequences = prepare_decoupled_ball_sequences(electrode_to_unit)
     
     # Prepare feedback sequences
-    print_substep("Preparing hit feedback sequence...")
     hit_sequence = prepare_hit_feedback_sequence()
-    
-    print_substep("Preparing miss feedback sequence...")
     miss_sequence = prepare_miss_feedback_sequence()
     
-    # Combine all sequences into one dictionary
+    # Combine all sequences
     sequences = ball_sequences.copy()
     sequences["hit_feedback"] = hit_sequence
     sequences["miss_feedback"] = miss_sequence
     
-    print_success(f"All stimulation sequences prepared successfully")
-    print_info(f"Total sequences: {len(sequences)}")
-    print_info(f"  - Ball position: {len(ball_sequences)} frequencies (4-40Hz)")
-    print_info(f"  - Hit feedback: 1 sequence")
-    print_info(f"  - Miss feedback: 1 sequence")
+    print_success(f"All {len(sequences)} sequences prepared and uploaded to mxwserver")
+    print_info("Sequences are persistent and ready for C++ module triggering")
     
     return sequences
 
@@ -606,20 +599,7 @@ def start_recording(
     recording_name: str,
     wells: List[int] = [0]
 ) -> mx.Saving:
-    """Start recording data to HDF5 file
-    
-    Parameters
-    ----------
-    recording_name : str
-        Name of the recording file (without extension)
-    wells : List[int]
-        List of well indices to record
-        
-    Returns
-    -------
-    mx.Saving
-        Saving object for controlling recording
-    """
+    """Start recording data to HDF5 file"""
     print_step_header(10, "STARTING DATA RECORDING")
     
     recording_path = Path(RECORDING_DIR) / f"{recording_name}.raw.h5"
@@ -653,21 +633,12 @@ def start_recording(
         raise
     
     print_success("Data recording active")
-    print_info(f"Wells: {wells}")
-    print_info(f"Channels: 1024")
-    print_info(f"Sampling rate: 20 kHz")
     
     return s
 
 
 def stop_recording(saving: mx.Saving) -> None:
-    """Stop recording and close file
-    
-    Parameters
-    ----------
-    saving : mx.Saving
-        Saving object to stop
-    """
+    """Stop recording and close file"""
     print_step_header(13, "STOPPING DATA RECORDING")
     
     print_substep("Stopping recording...")
@@ -699,24 +670,18 @@ def stop_recording(saving: mx.Saving) -> None:
 
 def export_cpp_config(
     array: mx.Array,
-    stim_units: List[int],
-    sequences: Dict[str, mx.Sequence],  # 新增参数
+    electrode_to_unit: Dict[int, int],
+    sequences: Dict[str, mx.Sequence],
     config_path: str
 ) -> Dict:
     """Export configuration for C++ closed-loop module
-    
-    The C++ module will read this JSON file to know:
-    - Which electrodes to monitor for spikes
-    - Which stimulation units to control
-    - Stimulation parameters
-    - Available stimulation sequences
     
     Parameters
     ----------
     array : mx.Array
         Configured array
-    stim_units : List[int]
-        List of stimulation unit indices
+    electrode_to_unit : Dict[int, int]
+        Mapping from electrode ID to stimulation unit ID
     sequences : Dict[str, mx.Sequence]
         Dictionary of prepared sequences
     config_path : str
@@ -732,10 +697,8 @@ def export_cpp_config(
     print_substep("Retrieving channel mappings from array...")
     
     try:
-        # Get channel mappings from array config
         config = array.get_config()
         
-        # Map electrodes to channels
         sensory_channels = config.get_channels_for_electrodes(SENSORY_RECORDING_ELECTRODES)
         motor_1_channels = config.get_channels_for_electrodes(MOTOR_1_RECORDING_ELECTRODES)
         motor_2_channels = config.get_channels_for_electrodes(MOTOR_2_RECORDING_ELECTRODES)
@@ -754,15 +717,30 @@ def export_cpp_config(
     print_substep("Building configuration structure...")
     
     # Extract ball position sequence names
-    ball_sequences = [k for k in sequences.keys() if k.startswith("ball_")]
-    ball_frequencies = sorted([int(k.split("_")[1].replace("hz", "")) for k in ball_sequences])
+    ball_sequences = [k for k in sequences.keys() if any(pos in k for pos in POSITION_NAMES)]
+    frequencies = STIM_PARAMS["ball_position"]["frequencies_Hz"]
+    
+    # Create position->unit mapping
+    position_to_unit = {
+        POSITION_NAMES[idx]: electrode_to_unit[electrode]
+        for idx, electrode in enumerate(SENSORY_STIM_ELECTRODES)
+    }
+    
+    # Create sequence lookup table for C++
+    sequence_lookup = {}
+    for pos_name in POSITION_NAMES:
+        sequence_lookup[pos_name] = {}
+        for freq in frequencies:
+            seq_name = f"{pos_name}_{freq}hz"
+            sequence_lookup[pos_name][freq] = seq_name
     
     cpp_config = {
         "experiment": {
-            "name": "pong_closed_loop",
-            "description": "Real-time Pong game with neuronal control",
-            "version": "1.0",
-            "timestamp": datetime.now().isoformat()
+            "name": "pong_closed_loop_decoupled",
+            "description": "Pong with 8 positions × 10 frequencies (80 sequences)",
+            "version": "2.0",
+            "timestamp": datetime.now().isoformat(),
+            "architecture": "Fully decoupled position × frequency"
         },
         
         "electrodes": {
@@ -779,19 +757,21 @@ def export_cpp_config(
             "stim_channels": stim_channels
         },
         
-        "stimulation_units": stim_units,
+        "stimulation_units": {
+            "electrode_to_unit": electrode_to_unit,
+            "position_to_unit": position_to_unit,
+            "positions": POSITION_NAMES
+        },
         
         "stimulation_parameters": STIM_PARAMS,
         
-        # New: Sequence mapping for C++ module
         "sequences": {
             "ball_position": {
-                "available_frequencies": ball_frequencies,
-                "sequence_names": ball_sequences,
-                "mapping": {
-                    freq: f"ball_{freq}hz" 
-                    for freq in ball_frequencies
-                }
+                "total_sequences": len(ball_sequences),
+                "positions": POSITION_NAMES,
+                "frequencies": frequencies,
+                "sequence_lookup": sequence_lookup,
+                "usage_example": "pos3_mid_20hz triggers 20Hz at position 3"
             },
             "hit_feedback": {
                 "sequence_name": "hit_feedback",
@@ -803,19 +783,34 @@ def export_cpp_config(
             }
         },
         
+        "cpp_usage": {
+            "triggering": {
+                "method": "maxlab::sendSequence(sequence_name)",
+                "example_1": 'maxlab::sendSequence("pos0_top_40hz")',
+                "example_2": 'maxlab::sendSequence("pos7_bottom_4hz")',
+                "example_3": 'maxlab::sendSequence("hit_feedback")'
+            },
+            "sequence_selection": {
+                "description": "Map ball position and distance to sequence name",
+                "position_index": "0-7 (top to bottom)",
+                "frequency_index": "0-9 (4-40Hz in 4Hz steps)",
+                "formula": f'std::string seq = positions[pos_idx] + "_" + std::to_string(frequencies[freq_idx]) + "hz"'
+            }
+        },
+        
         "game_parameters": {
             "ball_speed": 0.5,
             "paddle_speed": 1.0,
             "paddle_height": 0.2,
             "update_rate_ms": 10,
-            
-            # Ball distance to frequency mapping
+            "num_positions": len(POSITION_NAMES),
+            "position_mapping": {
+                "description": "Normalize ball Y position [0,1] to position index [0,7]",
+                "formula": "pos_idx = int(ball_y * 7.99)"
+            },
             "distance_to_frequency": {
-                "description": "Map normalized ball distance [0,1] to stimulation frequency",
-                "min_frequency_hz": 4,
-                "max_frequency_hz": 40,
-                "step_hz": 4,
-                "formula": "freq = 4 * round((40 - 36 * distance) / 4)"
+                "description": "Map ball distance [0,1] to frequency index [0,9]",
+                "formula": "freq_idx = int((1.0 - distance) * 9.99)"
             }
         },
         
@@ -838,19 +833,15 @@ def export_cpp_config(
         print_error(f"Failed to write config file: {str(e)}")
         raise
     
-    print_info("Channel mappings summary:")
-    print_info(f"  - Sensory (ball position): {sensory_channels}")
-    print_info(f"  - Motor 1 (paddle up): {motor_1_channels}")
-    print_info(f"  - Motor 2 (paddle down): {motor_2_channels}")
-    print_info(f"  - Stimulation: {stim_channels}")
-    print_info(f"Stimulation units: {stim_units}")
-    print_info(f"Available ball sequences: {ball_sequences}")
+    print_info("Decoupled architecture summary:")
+    print_info(f"  - Positions: {len(POSITION_NAMES)}")
+    print_info(f"  - Frequencies: {len(frequencies)}")
+    print_info(f"  - Total ball sequences: {len(ball_sequences)}")
+    print_info(f"  - Position->Unit mapping: {position_to_unit}")
     
     print_success("Configuration export complete")
     
     return cpp_config
-
-
 
 
 # ============================================================================
@@ -858,20 +849,13 @@ def export_cpp_config(
 # ============================================================================
 
 def analyze_recording(recording_path: str) -> None:
-    """Perform basic analysis of recorded data
-    
-    Parameters
-    ----------
-    recording_path : str
-        Path to the .raw.h5 file
-    """
+    """Perform basic analysis of recorded data"""
     print_step_header(14, "ANALYZING RECORDED DATA")
     
     print_substep(f"Opening recording file: {recording_path}")
     
     try:
         with File(recording_path, 'r') as f:
-            # Get spike data
             well_path = "wells/well000/rec0000"
             traces = f[f"{well_path}/groups/all_channels/raw"]
             events = f[f"{well_path}/events"]
@@ -881,17 +865,13 @@ def analyze_recording(recording_path: str) -> None:
             print_info(f"Trace shape: {traces.shape}")
             print_info(f"Number of events: {len(events)}")
             duration = traces.shape[1] / 20000
-            print_info(f"Recording duration: {duration:.2f} seconds ({duration/60:.2f} minutes)")
+            print_info(f"Recording duration: {duration:.2f} seconds")
             
-            # Count events by type
             if len(events) > 0:
                 print_substep("Analyzing event types...")
                 event_types = {}
                 for event in events:
-                    event_id = event[2]
                     event_desc = event[3].decode('utf-8') if isinstance(event[3], bytes) else str(event[3])
-                    
-                    # Extract event type from description
                     event_type = event_desc.split('_')[0] if '_' in event_desc else event_desc
                     event_types[event_type] = event_types.get(event_type, 0) + 1
                 
@@ -915,23 +895,14 @@ def run_pong_experiment(
     condition: str = "STIMULUS",
     wells: List[int] = [0]
 ) -> None:
-    """Run complete Pong experiment
-    
-    Parameters
-    ----------
-    duration_minutes : int
-        Experiment duration in minutes
-    condition : str
-        Experimental condition ("STIMULUS", "RANDOM_STIMULUS", "NO_STIMULUS")
-    wells : List[int]
-        List of well indices to use
-    """
+    """Run complete Pong experiment with decoupled architecture"""
     print("\n" + "=" * 70)
-    print("PONG CLOSED-LOOP EXPERIMENT")
+    print("PONG CLOSED-LOOP EXPERIMENT (DECOUPLED ARCHITECTURE)")
     print("=" * 70)
     print(f"\nCondition: {condition}")
     print(f"Duration: {duration_minutes} minutes")
     print(f"Wells: {wells}")
+    print(f"Architecture: 8 positions × 10 frequencies = 80 sequences")
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     session_name = f"pong_{condition}_{timestamp}"
@@ -955,10 +926,10 @@ def run_pong_experiment(
     
     array = configure_array(all_recording, SENSORY_STIM_ELECTRODES)
     
-    # Step 3: Connect stimulation
-    stim_units = connect_stim_units_to_stim_electrodes(SENSORY_STIM_ELECTRODES, array)
+    # Step 3: Connect stimulation (returns electrode->unit mapping)
+    electrode_to_unit = connect_stim_units_to_stim_electrodes(SENSORY_STIM_ELECTRODES, array)
     
-    # Activate wells
+    # Step 4: Activate wells
     print_step_header(4, "ACTIVATING WELLS")
     print_substep(f"Activating wells: {wells}")
     try:
@@ -968,7 +939,7 @@ def run_pong_experiment(
         print_error(f"Failed to activate wells: {str(e)}")
         raise
     
-    # Step 4: Download configuration
+    # Step 5: Download configuration
     print_step_header(5, "DOWNLOADING CONFIGURATION TO HARDWARE")
     print_substep("Transferring array configuration to chip...")
     try:
@@ -982,9 +953,9 @@ def run_pong_experiment(
     time.sleep(mx.Timing.waitAfterDownload)
     print_success("Hardware ready")
     
-    # Step 5: Calibration
+    # Step 6: Calibration
     print_step_header(5, "PERFORMING CALIBRATION")
-    print_substep("Running offset compensation (this will take ~15 seconds)...")
+    print_substep("Running offset compensation...")
     try:
         mx.offset()
         print_success("Offset compensation initiated")
@@ -999,10 +970,11 @@ def run_pong_experiment(
             print_info(f"{15 - (i + 1)} seconds remaining...")
     print_success("Calibration complete")
     
-    # Step 6: Power up stimulation units
-    configure_and_powerup_stim_units(stim_units)
+    # Step 7: Power up stimulation units
+    all_units = list(electrode_to_unit.values())
+    configure_and_powerup_stim_units(all_units)
     
-    # Step 7: Clear event buffer
+    # Step 8: Clear event buffer
     print_step_header(7, "CLEARING EVENT BUFFER")
     print_substep("Clearing any previous events from buffer...")
     try:
@@ -1012,39 +984,35 @@ def run_pong_experiment(
         print_error(f"Failed to clear events: {str(e)}")
         raise
     
-    # Step 8: Prepare stimulation sequences
-    sequences = prepare_all_sequences()
+    # Step 9: Prepare all decoupled sequences
+    sequences = prepare_all_sequences(electrode_to_unit)
     
-    # Step 9: Export configuration for C++ module
-    cpp_config = export_cpp_config(array, stim_units, str(config_path))
+    # Step 10: Export configuration for C++
+    cpp_config = export_cpp_config(array, electrode_to_unit, sequences, str(config_path))
     
-    # Step 10: Start recording
+    # Step 11: Start recording
     saving = start_recording(session_name, wells)
     
-    # Step 11: Baseline recording
+    # Step 12: Baseline recording
     print_step_header(11, "BASELINE RECORDING")
     baseline_duration = 30
-    print_substep(f"Recording {baseline_duration}s baseline before experiment...")
+    print_substep(f"Recording {baseline_duration}s baseline...")
     for i in range(baseline_duration):
         if (i + 1) % 10 == 0:
             print_info(f"{baseline_duration - (i + 1)} seconds remaining...")
         time.sleep(1)
     print_success("Baseline recording complete")
     
-    # Step 12: C++ module integration point
+    # Step 13: C++ module integration
     print_step_header(12, "C++ MODULE INTEGRATION POINT")
-    print_warning("C++ module loading would happen here")
-    print_info("Command: mx.load_module('libpong_closed_loop.so', '{config_path}')")
-    print_info("\nC++ module responsibilities:")
-    print_info("  - Monitor spike events from sensory and motor channels")
-    print_info("  - Update game physics at 10ms intervals")
-    print_info("  - Trigger pre-configured sequences based on game state")
-    print_info("  - Log game events to CSV file")
+    print_warning("C++ module would be loaded here")
+    print_info(f"Command: mx.load_module('libpong_closed_loop.so', '{config_path}')")
+    print_info("\nC++ usage example:")
+    print_info('  maxlab::sendSequence("pos3_mid_20hz");  // Trigger 20Hz at middle position')
+    print_info('  maxlab::sendSequence("pos0_top_40hz");   // Trigger 40Hz at top')
+    print_info('  maxlab::sendSequence("hit_feedback");    // Positive feedback')
     
-    # Simulate experiment duration
     print_substep(f"Running experiment for {duration_minutes} minutes...")
-    print_info("(In production environment, C++ module would be running)")
-    
     total_seconds = duration_minutes * 60
     last_update = 0
     
@@ -1058,10 +1026,10 @@ def run_pong_experiment(
     
     print_success("Experiment duration complete")
     
-    # Step 13: Stop recording
+    # Step 14: Stop recording
     stop_recording(saving)
     
-    # Step 14: Analyze results
+    # Step 15: Analyze results
     recording_path = Path(RECORDING_DIR) / f"{session_name}.raw.h5"
     if recording_path.exists():
         analyze_recording(str(recording_path))
@@ -1073,14 +1041,13 @@ def run_pong_experiment(
     print("EXPERIMENT COMPLETE")
     print("=" * 70)
     print_success("All steps completed successfully!")
+    print_info("\nDecoupled architecture summary:")
+    print_info(f"  - Total sequences: {len(sequences)}")
+    print_info(f"  - Ball sequences: 80 (8 positions × 10 frequencies)")
+    print_info(f"  - Feedback sequences: 2 (hit/miss)")
     print_info("\nOutput files:")
     print_info(f"  - Recording: {recording_path}")
     print_info(f"  - Configuration: {config_path}")
-    print_info("\nNext steps:")
-    print_info("  1. Review recorded data using MaxLab analysis tools")
-    print_info("  2. Analyze game performance from C++ module logs")
-    print_info("  3. Compare spike activity across experimental conditions")
-    print_info("  4. Generate figures and statistics for publication")
 
 
 # ============================================================================
@@ -1089,13 +1056,12 @@ def run_pong_experiment(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MaxLab Pong Closed-Loop Experiment Setup",
+        description="MaxLab Pong Experiment (Decoupled Architecture)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   %(prog)s --duration 20 --condition STIMULUS
   %(prog)s --duration 30 --condition NO_STIMULUS --wells 0 1
-  %(prog)s --duration 10 --condition RANDOM_STIMULUS
         """
     )
     
@@ -1125,12 +1091,13 @@ Examples:
     args = parser.parse_args()
     
     print("\n" + "=" * 70)
-    print("MAXLAB PONG EXPERIMENT - INITIALIZATION")
+    print("MAXLAB PONG EXPERIMENT - DECOUPLED ARCHITECTURE")
     print("=" * 70)
     print(f"\nConfiguration:")
     print(f"  Duration: {args.duration} minutes")
     print(f"  Condition: {args.condition}")
     print(f"  Wells: {args.wells}")
+    print(f"  Architecture: 8 positions × 10 frequencies")
     print("\nStarting experiment...")
     
     try:
@@ -1144,7 +1111,6 @@ Examples:
         print("\n\n" + "=" * 70)
         print("EXPERIMENT INTERRUPTED BY USER")
         print("=" * 70)
-        print_warning("Experiment stopped by user (Ctrl+C)")
         return 130
     except Exception as e:
         print("\n\n" + "=" * 70)
@@ -1152,7 +1118,6 @@ Examples:
         print("=" * 70)
         print_error(f"Error: {str(e)}")
         import traceback
-        print("\nFull traceback:")
         traceback.print_exc()
         return 1
 
