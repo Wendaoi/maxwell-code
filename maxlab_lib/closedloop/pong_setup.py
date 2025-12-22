@@ -94,6 +94,42 @@ event_counter = 0  # Global event counter
 
 
 # ============================================================================
+# UTILITY FUNCTIONS FOR PROGRESS TRACKING
+# ============================================================================
+
+def print_step_header(step_number: int, step_name: str, total_steps: int = 14) -> None:
+    """Print a formatted step header"""
+    print("\n" + "=" * 70)
+    print(f"STEP {step_number}/{total_steps}: {step_name}")
+    print("=" * 70)
+
+
+def print_substep(message: str, indent: int = 2) -> None:
+    """Print a substep with indentation"""
+    print(" " * indent + "→ " + message)
+
+
+def print_success(message: str, indent: int = 2) -> None:
+    """Print a success message"""
+    print(" " * indent + "✓ " + message)
+
+
+def print_info(message: str, indent: int = 4) -> None:
+    """Print an info message"""
+    print(" " * indent + "• " + message)
+
+
+def print_warning(message: str, indent: int = 2) -> None:
+    """Print a warning message"""
+    print(" " * indent + "⚠ " + message)
+
+
+def print_error(message: str, indent: int = 2) -> None:
+    """Print an error message"""
+    print(" " * indent + "✗ " + message)
+
+
+# ============================================================================
 # SYSTEM INITIALIZATION (Reusing from stimulate.py)
 # ============================================================================
 
@@ -103,16 +139,27 @@ def initialize_system() -> None:
     Reused from stimulate.py example.
     Powers on stimulation units and ensures clean state.
     """
-    print("=" * 60)
-    print("INITIALIZING MAXLAB SYSTEM")
-    print("=" * 60)
+    print_step_header(1, "INITIALIZING MAXLAB SYSTEM")
     
-    mx.initialize()
-    if mx.send(mx.Core().enable_stimulation_power(True)) != "Ok":
+    print_substep("Connecting to MaxLab server...")
+    try:
+        mx.initialize()
+        print_success("Connected to MaxLab server")
+    except Exception as e:
+        print_error(f"Failed to connect: {str(e)}")
+        raise
+    
+    print_substep("Enabling stimulation power...")
+    try:
+        result = mx.send(mx.Core().enable_stimulation_power(True))
+        if result != "Ok":
+            raise RuntimeError(f"Stimulation power enable returned: {result}")
+        print_success("Stimulation power enabled")
+    except Exception as e:
+        print_error(f"Failed to enable stimulation power: {str(e)}")
         raise RuntimeError("The system didn't initialize correctly.")
     
-    print("✓ System initialized")
-    print("✓ Stimulation power enabled")
+    print_success("System initialization complete")
 
 
 # ============================================================================
@@ -136,20 +183,58 @@ def configure_array(electrodes: List[int], stim_electrodes: List[int]) -> mx.Arr
     mx.Array
         Configured array (not yet downloaded to hardware)
     """
-    print("\nConfiguring electrode array...")
-    print(f"  - Recording electrodes: {len(electrodes)}")
-    print(f"  - Stimulation electrodes: {len(stim_electrodes)}")
+    print_step_header(2, "CONFIGURING ELECTRODE ARRAY")
     
-    array = mx.Array("pong_experiment")
-    array.reset()
-    array.clear_selected_electrodes()
-    array.select_electrodes(electrodes)
-    array.select_stimulation_electrodes(stim_electrodes)
+    print_info(f"Total recording electrodes: {len(electrodes)}")
+    print_info(f"Stimulation electrodes: {len(stim_electrodes)}")
+    print_info(f"Sensory recording: {len(SENSORY_RECORDING_ELECTRODES)} electrodes")
+    print_info(f"Motor 1 recording: {len(MOTOR_1_RECORDING_ELECTRODES)} electrodes")
+    print_info(f"Motor 2 recording: {len(MOTOR_2_RECORDING_ELECTRODES)} electrodes")
     
-    print("  - Routing electrodes (this may take a moment)...")
-    array.route()
+    print_substep("Creating array configuration...")
+    try:
+        array = mx.Array("pong_experiment")
+        print_success("Array object created")
+    except Exception as e:
+        print_error(f"Failed to create array: {str(e)}")
+        raise
     
-    print("✓ Array configured successfully")
+    print_substep("Resetting previous configuration...")
+    try:
+        array.reset()
+        array.clear_selected_electrodes()
+        print_success("Previous configuration cleared")
+    except Exception as e:
+        print_error(f"Failed to reset: {str(e)}")
+        raise
+    
+    print_substep("Selecting recording electrodes...")
+    try:
+        array.select_electrodes(electrodes)
+        print_success(f"Selected {len(electrodes)} recording electrodes")
+    except Exception as e:
+        print_error(f"Failed to select electrodes: {str(e)}")
+        raise
+    
+    print_substep("Selecting stimulation electrodes...")
+    try:
+        array.select_stimulation_electrodes(stim_electrodes)
+        print_success(f"Selected {len(stim_electrodes)} stimulation electrodes")
+    except Exception as e:
+        print_error(f"Failed to select stimulation electrodes: {str(e)}")
+        raise
+    
+    print_substep("Routing electrodes (this may take 10-30 seconds)...")
+    try:
+        start_time = time.time()
+        array.route()
+        elapsed = time.time() - start_time
+        print_success(f"Routing completed in {elapsed:.1f} seconds")
+    except Exception as e:
+        print_error(f"Routing failed: {str(e)}")
+        raise
+    
+    print_success("Array configuration complete")
     return array
 
 
@@ -160,29 +245,44 @@ def connect_stim_units_to_stim_electrodes(
     
     Reused from stimulate.py example with added validation.
     """
-    print("\nConnecting stimulation units to electrodes...")
+    print_step_header(3, "CONNECTING STIMULATION UNITS")
+    
+    print_info(f"Attempting to connect {len(stim_electrodes)} electrodes to stimulation units")
+    
     stim_units: List[int] = []
     
-    for stim_el in stim_electrodes:
-        array.connect_electrode_to_stimulation(stim_el)
-        stim = array.query_stimulation_at_electrode(stim_el)
+    for idx, stim_el in enumerate(stim_electrodes, 1):
+        print_substep(f"Connecting electrode {stim_el} ({idx}/{len(stim_electrodes)})...")
         
-        if len(stim) == 0:
-            raise RuntimeError(
-                f"No stimulation channel can connect to electrode: {stim_el}\n"
-                f"Please select a neighboring electrode instead."
-            )
+        try:
+            array.connect_electrode_to_stimulation(stim_el)
+            stim = array.query_stimulation_at_electrode(stim_el)
+            
+            if len(stim) == 0:
+                print_error(f"No stimulation unit available for electrode {stim_el}")
+                raise RuntimeError(
+                    f"No stimulation channel can connect to electrode: {stim_el}\n"
+                    f"Please select a neighboring electrode instead."
+                )
+            
+            stim_unit_int = int(stim)
+            
+            if stim_unit_int in stim_units:
+                print_error(f"Electrode {stim_el} conflicts with existing connection")
+                raise RuntimeError(
+                    f"Two electrodes connected to the same stim unit {stim_unit_int}.\n"
+                    f"This is not allowed. Please select a neighboring electrode of {stim_el}!"
+                )
+            else:
+                stim_units.append(stim_unit_int)
+                print_success(f"Electrode {stim_el} → Stim Unit {stim_unit_int}")
         
-        stim_unit_int = int(stim)
-        
-        if stim_unit_int in stim_units:
-            raise RuntimeError(
-                f"Two electrodes connected to the same stim unit {stim_unit_int}.\n"
-                f"This is not allowed. Please select a neighboring electrode of {stim_el}!"
-            )
-        else:
-            stim_units.append(stim_unit_int)
-            print(f"  ✓ Electrode {stim_el} → Stim Unit {stim_unit_int}")
+        except Exception as e:
+            print_error(f"Connection failed: {str(e)}")
+            raise
+    
+    print_success(f"All {len(stim_units)} stimulation units connected successfully")
+    print_info(f"Stimulation unit IDs: {stim_units}")
     
     return stim_units
 
@@ -193,18 +293,29 @@ def configure_and_powerup_stim_units(stim_units: List[int]) -> None:
     Reused from stimulate.py example.
     All units use DAC source 0 for synchronized control.
     """
-    print("\nPowering up stimulation units...")
+    print_step_header(6, "POWERING UP STIMULATION UNITS")
     
-    for stim_unit in stim_units:
-        stim = (
-            mx.StimulationUnit(stim_unit)
-            .power_up(True)
-            .connect(True)
-            .set_voltage_mode()
-            .dac_source(0)  # All use DAC 0 for C++ control
-        )
-        mx.send(stim)
-        print(f"  ✓ Stim Unit {stim_unit} powered up")
+    print_info(f"Configuring {len(stim_units)} stimulation units")
+    print_info("Mode: Voltage mode, DAC source 0")
+    
+    for idx, stim_unit in enumerate(stim_units, 1):
+        print_substep(f"Powering up unit {stim_unit} ({idx}/{len(stim_units)})...")
+        
+        try:
+            stim = (
+                mx.StimulationUnit(stim_unit)
+                .power_up(True)
+                .connect(True)
+                .set_voltage_mode()
+                .dac_source(0)  # All use DAC 0 for C++ control
+            )
+            mx.send(stim)
+            print_success(f"Stim Unit {stim_unit} powered up and ready")
+        except Exception as e:
+            print_error(f"Failed to power up unit {stim_unit}: {str(e)}")
+            raise
+    
+    print_success("All stimulation units powered up successfully")
 
 
 # ============================================================================
@@ -298,6 +409,8 @@ def prepare_ball_position_sequence() -> mx.Sequence:
     mx.Sequence
         Single biphasic pulse sequence
     """
+    print_substep("Preparing ball position feedback sequence...")
+    
     seq = mx.Sequence()
     params = STIM_PARAMS["ball_position"]
     
@@ -307,6 +420,11 @@ def prepare_ball_position_sequence() -> mx.Sequence:
         phase_us=params["phase_us"],
         event_label="ball_position_pulse"
     )
+    
+    print_success("Ball position sequence ready")
+    print_info(f"Amplitude: {params['amplitude_mV']}mV")
+    print_info(f"Phase width: {params['phase_us']}µs")
+    print_info(f"Frequency range: {params['frequency_min_Hz']}-{params['frequency_max_Hz']}Hz")
     
     return seq
 
@@ -321,6 +439,8 @@ def prepare_hit_feedback_sequence() -> mx.Sequence:
     mx.Sequence
         Burst stimulation sequence
     """
+    print_substep("Preparing hit feedback sequence...")
+    
     seq = mx.Sequence()
     params = STIM_PARAMS["hit_feedback"]
     
@@ -332,6 +452,8 @@ def prepare_hit_feedback_sequence() -> mx.Sequence:
     # Inter-pulse interval in samples
     interval_samples = int(20000 / frequency_Hz)  # 20kHz sampling
     
+    print_info(f"Generating {num_pulses} pulses...")
+    
     for i in range(num_pulses):
         create_biphasic_pulse(
             seq,
@@ -340,6 +462,11 @@ def prepare_hit_feedback_sequence() -> mx.Sequence:
             event_label=f"hit_feedback_pulse_{i+1}"
         )
         seq.append(mx.DelaySamples(interval_samples))
+    
+    print_success("Hit feedback sequence ready")
+    print_info(f"Burst: {num_pulses} pulses at {frequency_Hz}Hz")
+    print_info(f"Amplitude: {params['amplitude_mV']}mV")
+    print_info(f"Duration: {burst_duration_ms}ms")
     
     return seq
 
@@ -354,6 +481,8 @@ def prepare_miss_feedback_sequence() -> mx.Sequence:
     mx.Sequence
         Aversive stimulation sequence
     """
+    print_substep("Preparing miss feedback sequence...")
+    
     seq = mx.Sequence()
     params = STIM_PARAMS["miss_feedback"]
     
@@ -361,6 +490,8 @@ def prepare_miss_feedback_sequence() -> mx.Sequence:
     burst_duration_ms = params["burst_duration_ms"]
     base_frequency_Hz = params["burst_frequency_Hz"]
     num_pulses = int((burst_duration_ms / 1000.0) * base_frequency_Hz)
+    
+    print_info(f"Generating {num_pulses} irregular pulses...")
     
     # Add jitter to make it unpredictable
     np.random.seed(42)  # Reproducible randomness
@@ -381,6 +512,11 @@ def prepare_miss_feedback_sequence() -> mx.Sequence:
         jitter = int(base_interval * np.random.uniform(0.5, 1.5))
         seq.append(mx.DelaySamples(base_interval + jitter))
     
+    print_success("Miss feedback sequence ready")
+    print_info(f"Unpredictable burst: {num_pulses} pulses")
+    print_info(f"Amplitude: {params['amplitude_mV']}mV ± 20% jitter")
+    print_info(f"Duration: {burst_duration_ms}ms")
+    
     return seq
 
 
@@ -394,9 +530,9 @@ def prepare_all_sequences() -> Dict[str, mx.Sequence]:
     Dict[str, mx.Sequence]
         Dictionary of named sequences
     """
-    print("\n" + "=" * 60)
-    print("PREPARING STIMULATION SEQUENCES")
-    print("=" * 60)
+    print_step_header(8, "PREPARING STIMULATION SEQUENCES")
+    
+    print_info("Preparing 3 sequence types for C++ module")
     
     sequences = {
         "ball_position": prepare_ball_position_sequence(),
@@ -404,23 +540,7 @@ def prepare_all_sequences() -> Dict[str, mx.Sequence]:
         "miss_feedback": prepare_miss_feedback_sequence(),
     }
     
-    print("\n✓ Ball position feedback sequence ready")
-    print(f"  - Single pulse: {STIM_PARAMS['ball_position']['amplitude_mV']}mV")
-    print(f"  - Phase width: {STIM_PARAMS['ball_position']['phase_us']}µs")
-    
-    print("\n✓ Hit feedback sequence ready")
-    params = STIM_PARAMS["hit_feedback"]
-    num_pulses = int((params["burst_duration_ms"] / 1000.0) * params["burst_frequency_Hz"])
-    print(f"  - Burst: {num_pulses} pulses at {params['burst_frequency_Hz']}Hz")
-    print(f"  - Amplitude: {params['amplitude_mV']}mV")
-    print(f"  - Duration: {params['burst_duration_ms']}ms")
-    
-    print("\n✓ Miss feedback sequence ready")
-    params = STIM_PARAMS["miss_feedback"]
-    num_pulses = int((params["burst_duration_ms"] / 1000.0) * params["burst_frequency_Hz"])
-    print(f"  - Unpredictable burst: {num_pulses} pulses")
-    print(f"  - Amplitude: {params['amplitude_mV']}mV (with jitter)")
-    print(f"  - Duration: {params['burst_duration_ms']}ms")
+    print_success("All stimulation sequences prepared successfully")
     
     return sequences
 
@@ -447,25 +567,42 @@ def start_recording(
     mx.Saving
         Saving object for controlling recording
     """
-    print("\n" + "=" * 60)
-    print("STARTING DATA RECORDING")
-    print("=" * 60)
-    
-    s = mx.Saving()
-    s.open_directory(RECORDING_DIR)
-    s.start_file(recording_name)
-    
-    # Define recording group with all 1024 channels
-    s.group_define(0, "all_channels", list(range(1024)))
-    
-    # Start recording
-    s.start_recording(wells)
+    print_step_header(10, "STARTING DATA RECORDING")
     
     recording_path = Path(RECORDING_DIR) / f"{recording_name}.raw.h5"
-    print(f"\n✓ Recording started")
-    print(f"  - File: {recording_path}")
-    print(f"  - Wells: {wells}")
-    print(f"  - Channels: 1024")
+    
+    print_substep("Creating recording file...")
+    print_info(f"File path: {recording_path}")
+    
+    try:
+        s = mx.Saving()
+        s.open_directory(RECORDING_DIR)
+        s.start_file(recording_name)
+        print_success("Recording file created")
+    except Exception as e:
+        print_error(f"Failed to create file: {str(e)}")
+        raise
+    
+    print_substep("Defining recording channels...")
+    try:
+        s.group_define(0, "all_channels", list(range(1024)))
+        print_success("All 1024 channels configured")
+    except Exception as e:
+        print_error(f"Failed to define channels: {str(e)}")
+        raise
+    
+    print_substep(f"Starting recording on wells {wells}...")
+    try:
+        s.start_recording(wells)
+        print_success("Recording started successfully")
+    except Exception as e:
+        print_error(f"Failed to start recording: {str(e)}")
+        raise
+    
+    print_success("Data recording active")
+    print_info(f"Wells: {wells}")
+    print_info(f"Channels: 1024")
+    print_info(f"Sampling rate: 20 kHz")
     
     return s
 
@@ -478,18 +615,29 @@ def stop_recording(saving: mx.Saving) -> None:
     saving : mx.Saving
         Saving object to stop
     """
-    print("\n" + "=" * 60)
-    print("STOPPING DATA RECORDING")
-    print("=" * 60)
+    print_step_header(13, "STOPPING DATA RECORDING")
     
-    saving.stop_recording()
-    saving.stop_file()
-    saving.group_delete_all()
+    print_substep("Stopping recording...")
+    try:
+        saving.stop_recording()
+        print_success("Recording stopped")
+    except Exception as e:
+        print_error(f"Failed to stop recording: {str(e)}")
+        raise
     
-    # Wait for file to be properly closed
+    print_substep("Closing file...")
+    try:
+        saving.stop_file()
+        saving.group_delete_all()
+        print_success("File closed")
+    except Exception as e:
+        print_error(f"Failed to close file: {str(e)}")
+        raise
+    
+    print_substep(f"Waiting {mx.Timing.waitAfterRecording}s for file finalization...")
     time.sleep(mx.Timing.waitAfterRecording)
     
-    print("✓ Recording stopped and file closed")
+    print_success("Recording stopped and file closed successfully")
 
 
 # ============================================================================
@@ -522,18 +670,31 @@ def export_cpp_config(
     Dict
         Configuration dictionary
     """
-    print("\n" + "=" * 60)
-    print("EXPORTING CONFIGURATION FOR C++ MODULE")
-    print("=" * 60)
+    print_step_header(9, "EXPORTING CONFIGURATION FOR C++ MODULE")
     
-    # Get channel mappings from array config
-    config = array.get_config()
+    print_substep("Retrieving channel mappings from array...")
     
-    # Map electrodes to channels
-    sensory_channels = config.get_channels_for_electrodes(SENSORY_RECORDING_ELECTRODES)
-    motor_1_channels = config.get_channels_for_electrodes(MOTOR_1_RECORDING_ELECTRODES)
-    motor_2_channels = config.get_channels_for_electrodes(MOTOR_2_RECORDING_ELECTRODES)
-    stim_channels = config.get_channels_for_electrodes(SENSORY_STIM_ELECTRODES)
+    try:
+        # Get channel mappings from array config
+        config = array.get_config()
+        
+        # Map electrodes to channels
+        sensory_channels = config.get_channels_for_electrodes(SENSORY_RECORDING_ELECTRODES)
+        motor_1_channels = config.get_channels_for_electrodes(MOTOR_1_RECORDING_ELECTRODES)
+        motor_2_channels = config.get_channels_for_electrodes(MOTOR_2_RECORDING_ELECTRODES)
+        stim_channels = config.get_channels_for_electrodes(SENSORY_STIM_ELECTRODES)
+        
+        print_success("Channel mappings retrieved")
+        print_info(f"Sensory channels: {len(sensory_channels)}")
+        print_info(f"Motor 1 channels: {len(motor_1_channels)}")
+        print_info(f"Motor 2 channels: {len(motor_2_channels)}")
+        print_info(f"Stimulation channels: {len(stim_channels)}")
+        
+    except Exception as e:
+        print_error(f"Failed to retrieve channel mappings: {str(e)}")
+        raise
+    
+    print_substep("Building configuration structure...")
     
     cpp_config = {
         "experiment": {
@@ -574,18 +735,27 @@ def export_cpp_config(
         }
     }
     
-    # Save to JSON
-    config_file = Path(config_path)
-    with open(config_file, 'w') as f:
-        json.dump(cpp_config, f, indent=2)
+    print_success("Configuration structure built")
     
-    print(f"\n✓ Configuration exported to: {config_file}")
-    print("\nChannel mappings:")
-    print(f"  - Sensory (ball position): {len(sensory_channels)} channels")
-    print(f"  - Motor 1 (paddle up): {len(motor_1_channels)} channels")
-    print(f"  - Motor 2 (paddle down): {len(motor_2_channels)} channels")
-    print(f"  - Stimulation: {len(stim_channels)} channels")
-    print(f"\nStimulation units: {stim_units}")
+    print_substep(f"Writing configuration to JSON file...")
+    
+    try:
+        config_file = Path(config_path)
+        with open(config_file, 'w') as f:
+            json.dump(cpp_config, f, indent=2)
+        print_success(f"Configuration exported to: {config_file}")
+    except Exception as e:
+        print_error(f"Failed to write config file: {str(e)}")
+        raise
+    
+    print_info("Channel mappings summary:")
+    print_info(f"  - Sensory (ball position): {sensory_channels}")
+    print_info(f"  - Motor 1 (paddle up): {motor_1_channels}")
+    print_info(f"  - Motor 2 (paddle down): {motor_2_channels}")
+    print_info(f"  - Stimulation: {stim_channels}")
+    print_info(f"Stimulation units: {stim_units}")
+    
+    print_success("Configuration export complete")
     
     return cpp_config
 
@@ -602,35 +772,45 @@ def analyze_recording(recording_path: str) -> None:
     recording_path : str
         Path to the .raw.h5 file
     """
-    print("\n" + "=" * 60)
-    print("ANALYZING RECORDED DATA")
-    print("=" * 60)
+    print_step_header(14, "ANALYZING RECORDED DATA")
     
-    with File(recording_path, 'r') as f:
-        # Get spike data
-        well_path = "wells/well000/rec0000"
-        traces = f[f"{well_path}/groups/all_channels/raw"]
-        events = f[f"{well_path}/events"]
-        
-        print(f"\n✓ Recording file opened: {recording_path}")
-        print(f"  - Trace shape: {traces.shape}")
-        print(f"  - Number of events: {len(events)}")
-        print(f"  - Recording duration: {traces.shape[1] / 20000:.2f} seconds")
-        
-        # Count events by type
-        if len(events) > 0:
-            print("\nEvent summary:")
-            event_types = {}
-            for event in events:
-                event_id = event[2]
-                event_desc = event[3].decode('utf-8') if isinstance(event[3], bytes) else str(event[3])
-                
-                # Extract event type from description
-                event_type = event_desc.split('_')[0] if '_' in event_desc else event_desc
-                event_types[event_type] = event_types.get(event_type, 0) + 1
+    print_substep(f"Opening recording file: {recording_path}")
+    
+    try:
+        with File(recording_path, 'r') as f:
+            # Get spike data
+            well_path = "wells/well000/rec0000"
+            traces = f[f"{well_path}/groups/all_channels/raw"]
+            events = f[f"{well_path}/events"]
             
-            for event_type, count in sorted(event_types.items()):
-                print(f"  - {event_type}: {count} events")
+            print_success("Recording file opened successfully")
+            
+            print_info(f"Trace shape: {traces.shape}")
+            print_info(f"Number of events: {len(events)}")
+            duration = traces.shape[1] / 20000
+            print_info(f"Recording duration: {duration:.2f} seconds ({duration/60:.2f} minutes)")
+            
+            # Count events by type
+            if len(events) > 0:
+                print_substep("Analyzing event types...")
+                event_types = {}
+                for event in events:
+                    event_id = event[2]
+                    event_desc = event[3].decode('utf-8') if isinstance(event[3], bytes) else str(event[3])
+                    
+                    # Extract event type from description
+                    event_type = event_desc.split('_')[0] if '_' in event_desc else event_desc
+                    event_types[event_type] = event_types.get(event_type, 0) + 1
+                
+                print_success("Event analysis complete:")
+                for event_type, count in sorted(event_types.items()):
+                    print_info(f"  - {event_type}: {count} events")
+            else:
+                print_warning("No events recorded")
+    
+    except Exception as e:
+        print_error(f"Failed to analyze recording: {str(e)}")
+        raise
 
 
 # ============================================================================
@@ -653,9 +833,9 @@ def run_pong_experiment(
     wells : List[int]
         List of well indices to use
     """
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("PONG CLOSED-LOOP EXPERIMENT")
-    print("=" * 60)
+    print("=" * 70)
     print(f"\nCondition: {condition}")
     print(f"Duration: {duration_minutes} minutes")
     print(f"Wells: {wells}")
@@ -664,9 +844,14 @@ def run_pong_experiment(
     session_name = f"pong_{condition}_{timestamp}"
     config_path = Path(RECORDING_DIR) / f"{session_name}_config.json"
     
+    print(f"Session name: {session_name}")
+    print(f"Output directory: {RECORDING_DIR}")
+    
     # Step 1: Initialize system
     initialize_system()
+    print_substep(f"Waiting {mx.Timing.waitInit}s for system stabilization...")
     time.sleep(mx.Timing.waitInit)
+    print_success("System ready")
     
     # Step 2: Configure array
     all_recording = list(set(
@@ -677,27 +862,62 @@ def run_pong_experiment(
     
     array = configure_array(all_recording, SENSORY_STIM_ELECTRODES)
     
-    # Step 3: Activate wells and connect stimulation
-    mx.activate(wells)
+    # Step 3: Connect stimulation
     stim_units = connect_stim_units_to_stim_electrodes(SENSORY_STIM_ELECTRODES, array)
     
-    # Step 4: Download configuration to hardware
-    print("\nDownloading configuration to hardware...")
-    array.download(wells)
+    # Activate wells
+    print_step_header(4, "ACTIVATING WELLS")
+    print_substep(f"Activating wells: {wells}")
+    try:
+        mx.activate(wells)
+        print_success(f"Wells {wells} activated")
+    except Exception as e:
+        print_error(f"Failed to activate wells: {str(e)}")
+        raise
+    
+    # Step 4: Download configuration
+    print_step_header(5, "DOWNLOADING CONFIGURATION TO HARDWARE")
+    print_substep("Transferring array configuration to chip...")
+    try:
+        array.download(wells)
+        print_success("Configuration downloaded to hardware")
+    except Exception as e:
+        print_error(f"Download failed: {str(e)}")
+        raise
+    
+    print_substep(f"Waiting {mx.Timing.waitAfterDownload}s for hardware to stabilize...")
     time.sleep(mx.Timing.waitAfterDownload)
-    print("✓ Configuration downloaded")
+    print_success("Hardware ready")
     
     # Step 5: Calibration
-    print("\nPerforming offset compensation...")
-    mx.offset()
-    time.sleep(15)
-    print("✓ Offset compensation complete")
+    print_step_header(5, "PERFORMING CALIBRATION")
+    print_substep("Running offset compensation (this will take ~15 seconds)...")
+    try:
+        mx.offset()
+        print_success("Offset compensation initiated")
+    except Exception as e:
+        print_error(f"Offset compensation failed: {str(e)}")
+        raise
+    
+    print_substep("Waiting for calibration to complete...")
+    for i in range(15):
+        time.sleep(1)
+        if (i + 1) % 5 == 0:
+            print_info(f"{15 - (i + 1)} seconds remaining...")
+    print_success("Calibration complete")
     
     # Step 6: Power up stimulation units
     configure_and_powerup_stim_units(stim_units)
     
     # Step 7: Clear event buffer
-    mx.clear_events()
+    print_step_header(7, "CLEARING EVENT BUFFER")
+    print_substep("Clearing any previous events from buffer...")
+    try:
+        mx.clear_events()
+        print_success("Event buffer cleared")
+    except Exception as e:
+        print_error(f"Failed to clear events: {str(e)}")
+        raise
     
     # Step 8: Prepare stimulation sequences
     sequences = prepare_all_sequences()
@@ -708,53 +928,66 @@ def run_pong_experiment(
     # Step 10: Start recording
     saving = start_recording(session_name, wells)
     
-    # Step 11: Wait for baseline recording
-    print("\nRecording 30s baseline before starting C++ module...")
-    time.sleep(30)
+    # Step 11: Baseline recording
+    print_step_header(11, "BASELINE RECORDING")
+    baseline_duration = 30
+    print_substep(f"Recording {baseline_duration}s baseline before experiment...")
+    for i in range(baseline_duration):
+        if (i + 1) % 10 == 0:
+            print_info(f"{baseline_duration - (i + 1)} seconds remaining...")
+        time.sleep(1)
+    print_success("Baseline recording complete")
     
-    # Step 12: C++ module would be loaded here
-    print("\n" + "=" * 60)
-    print("C++ MODULE INTEGRATION POINT")
-    print("=" * 60)
-    print("\nAt this point, you would load the C++ closed-loop module:")
-    print(f"  mx.load_module('libpong_closed_loop.so', '{config_path}')")
-    print("\nThe C++ module will:")
-    print("  - Monitor spike events from sensory and motor channels")
-    print("  - Update game physics at 10ms intervals")
-    print("  - Trigger pre-configured sequences based on game state")
-    print("  - Log game events to CSV file")
+    # Step 12: C++ module integration point
+    print_step_header(12, "C++ MODULE INTEGRATION POINT")
+    print_warning("C++ module loading would happen here")
+    print_info("Command: mx.load_module('libpong_closed_loop.so', '{config_path}')")
+    print_info("\nC++ module responsibilities:")
+    print_info("  - Monitor spike events from sensory and motor channels")
+    print_info("  - Update game physics at 10ms intervals")
+    print_info("  - Trigger pre-configured sequences based on game state")
+    print_info("  - Log game events to CSV file")
     
-    # For now, simulate experiment duration
-    print(f"\nRunning experiment for {duration_minutes} minutes...")
-    print("(In production, C++ module runs here)")
+    # Simulate experiment duration
+    print_substep(f"Running experiment for {duration_minutes} minutes...")
+    print_info("(In production environment, C++ module would be running)")
     
-    # Simple progress indicator
     total_seconds = duration_minutes * 60
+    last_update = 0
+    
     for i in range(total_seconds):
-        if i % 60 == 0:
+        current_minute = i // 60
+        if current_minute != last_update:
             minutes_remaining = (total_seconds - i) // 60
-            print(f"  {minutes_remaining} minutes remaining...")
+            print_info(f"Time remaining: {minutes_remaining} minutes...")
+            last_update = current_minute
         time.sleep(1)
     
+    print_success("Experiment duration complete")
+    
     # Step 13: Stop recording
-    print("\nExperiment duration complete")
     stop_recording(saving)
     
     # Step 14: Analyze results
     recording_path = Path(RECORDING_DIR) / f"{session_name}.raw.h5"
     if recording_path.exists():
         analyze_recording(str(recording_path))
+    else:
+        print_warning(f"Recording file not found: {recording_path}")
     
-    print("\n" + "=" * 60)
+    # Final summary
+    print("\n" + "=" * 70)
     print("EXPERIMENT COMPLETE")
-    print("=" * 60)
-    print(f"\nOutput files:")
-    print(f"  - Recording: {recording_path}")
-    print(f"  - Configuration: {config_path}")
-    print(f"\nNext steps:")
-    print("  1. Review recorded data")
-    print("  2. Analyze game performance from C++ logs")
-    print("  3. Compare spike activity across conditions")
+    print("=" * 70)
+    print_success("All steps completed successfully!")
+    print_info("\nOutput files:")
+    print_info(f"  - Recording: {recording_path}")
+    print_info(f"  - Configuration: {config_path}")
+    print_info("\nNext steps:")
+    print_info("  1. Review recorded data using MaxLab analysis tools")
+    print_info("  2. Analyze game performance from C++ module logs")
+    print_info("  3. Compare spike activity across experimental conditions")
+    print_info("  4. Generate figures and statistics for publication")
 
 
 # ============================================================================
@@ -763,7 +996,14 @@ def run_pong_experiment(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MaxLab Pong Closed-Loop Experiment Setup"
+        description="MaxLab Pong Closed-Loop Experiment Setup",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s --duration 20 --condition STIMULUS
+  %(prog)s --duration 30 --condition NO_STIMULUS --wells 0 1
+  %(prog)s --duration 10 --condition RANDOM_STIMULUS
+        """
     )
     
     parser.add_argument(
@@ -791,19 +1031,37 @@ def main():
     
     args = parser.parse_args()
     
+    print("\n" + "=" * 70)
+    print("MAXLAB PONG EXPERIMENT - INITIALIZATION")
+    print("=" * 70)
+    print(f"\nConfiguration:")
+    print(f"  Duration: {args.duration} minutes")
+    print(f"  Condition: {args.condition}")
+    print(f"  Wells: {args.wells}")
+    print("\nStarting experiment...")
+    
     try:
         run_pong_experiment(
             duration_minutes=args.duration,
             condition=args.condition,
             wells=args.wells
         )
+        return 0
+    except KeyboardInterrupt:
+        print("\n\n" + "=" * 70)
+        print("EXPERIMENT INTERRUPTED BY USER")
+        print("=" * 70)
+        print_warning("Experiment stopped by user (Ctrl+C)")
+        return 130
     except Exception as e:
-        print(f"\n❌ ERROR: {str(e)}")
+        print("\n\n" + "=" * 70)
+        print("EXPERIMENT FAILED")
+        print("=" * 70)
+        print_error(f"Error: {str(e)}")
         import traceback
+        print("\nFull traceback:")
         traceback.print_exc()
         return 1
-    
-    return 0
 
 
 if __name__ == "__main__":
