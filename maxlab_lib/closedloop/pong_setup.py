@@ -100,6 +100,7 @@ STIM_PARAMS = {
 }
 
 event_counter = 0  # Global event counter
+STIM_NEIGHBOR_SEARCH_RADIUS = 2
 
 
 # ============================================================================
@@ -171,12 +172,19 @@ def initialize_system() -> None:
 # ARRAY CONFIGURATION
 # ============================================================================
 
-def configure_array(electrodes: List[int], stim_electrodes: List[int]) -> mx.Array:
+def configure_array(
+    electrodes: List[int],
+    stim_electrodes: List[int],
+    stim_position_electrodes: Optional[List[int]] = None,
+) -> mx.Array:
     """Configure array with recording and stimulation electrodes"""
     print_step_header(2, "CONFIGURING ELECTRODE ARRAY")
     
     print_info(f"Total recording electrodes: {len(electrodes)}")
-    print_info(f"Stimulation positions: {len(stim_electrodes)}")
+    position_count = len(stim_position_electrodes or stim_electrodes)
+    print_info(f"Stimulation positions: {position_count}")
+    if stim_position_electrodes is not None and len(stim_electrodes) != position_count:
+        print_info(f"Stimulation candidates (with neighbors): {len(stim_electrodes)}")
     print_info(f"Sensory recording: {len(SENSORY_RECORDING_ELECTRODES)} electrodes")
     print_info(f"Motor 1 recording: {len(MOTOR_1_RECORDING_ELECTRODES)} electrodes")
     print_info(f"Motor 2 recording: {len(MOTOR_2_RECORDING_ELECTRODES)} electrodes")
@@ -228,15 +236,56 @@ def configure_array(electrodes: List[int], stim_electrodes: List[int]) -> mx.Arr
     return array
 
 
+def build_stim_candidate_electrodes(
+    stim_electrodes: List[int], max_radius: int = STIM_NEIGHBOR_SEARCH_RADIUS
+) -> List[int]:
+    """Expand stimulation electrodes with nearby neighbors for fallback routing"""
+    if max_radius < 1:
+        return list(stim_electrodes)
+
+    candidates: List[int] = []
+    seen = set()
+
+    def add_candidate(electrode: int) -> None:
+        if electrode not in seen:
+            seen.add(electrode)
+            candidates.append(electrode)
+
+    for electrode in stim_electrodes:
+        add_candidate(electrode)
+
+    for electrode in stim_electrodes:
+        for radius in range(1, max_radius + 1):
+            for neighbor in mx.electrode_neighbors(electrode, radius):
+                add_candidate(neighbor)
+
+    return candidates
+
+
 def connect_stim_units_to_stim_electrodes(
-    stim_electrodes: List[int], array: mx.Array
-) -> Dict[int, int]:
+    stim_electrodes: List[int],
+    array: mx.Array,
+    candidate_electrodes: Optional[List[int]] = None,
+    neighbor_search_radius: int = STIM_NEIGHBOR_SEARCH_RADIUS,
+) -> Tuple[Dict[int, int], List[int]]:
     """Connect stimulation units to electrodes and return electrode->unit mapping
     
+    Parameters
+    ----------
+    stim_electrodes : List[int]
+        Requested stimulation electrodes (one per position).
+    array : mx.Array
+        Configured array with routing applied.
+    candidate_electrodes : Optional[List[int]]
+        Optional list of routed electrodes to consider as fallbacks.
+    neighbor_search_radius : int
+        Maximum radius for neighbor search when resolving conflicts.
+
     Returns
     -------
-    Dict[int, int]
-        Mapping from electrode ID to stimulation unit ID
+    Tuple[Dict[int, int], List[int]]
+        Mapping from electrode ID to stimulation unit ID, and resolved
+        stimulation electrode list (one per position)
     """
     print_step_header(3, "CONNECTING STIMULATION UNITS")
     
@@ -244,34 +293,114 @@ def connect_stim_units_to_stim_electrodes(
     
     electrode_to_unit: Dict[int, int] = {}
     used_units: List[int] = []
+    used_electrodes = set()
+    resolved_stim_electrodes: List[int] = []
+    candidate_set = set(candidate_electrodes) if candidate_electrodes else None
+
+    def disconnect_electrode(electrode: int) -> None:
+        try:
+            array.disconnect_electrode_from_stimulation(electrode)
+        except Exception:
+            pass
+
+    def try_connect(electrode: int) -> Tuple[Optional[int], str]:
+        try:
+            array.connect_electrode_to_stimulation(electrode)
+            stim = array.query_stimulation_at_electrode(electrode)
+        except Exception as e:
+            disconnect_electrode(electrode)
+            raise e
+
+        if len(stim) == 0:
+            disconnect_electrode(electrode)
+            return None, "no_unit"
+
+        stim_unit_int = int(stim)
+        if stim_unit_int in used_units:
+            disconnect_electrode(electrode)
+            return stim_unit_int, "unit_in_use"
+
+        return stim_unit_int, ""
+
+    def iter_neighbor_candidates(electrode: int) -> List[int]:
+        if neighbor_search_radius < 1:
+            return []
+        neighbors: List[int] = []
+        seen = set()
+        for radius in range(1, neighbor_search_radius + 1):
+            for neighbor in mx.electrode_neighbors(electrode, radius):
+                if neighbor in seen:
+                    continue
+                seen.add(neighbor)
+                if candidate_set is not None and neighbor not in candidate_set:
+                    continue
+                neighbors.append(neighbor)
+        return neighbors
     
     for idx, stim_el in enumerate(stim_electrodes, 1):
         position_name = POSITION_NAMES[idx - 1]
         print_substep(f"Connecting {position_name} (electrode {stim_el})...")
         
         try:
-            array.connect_electrode_to_stimulation(stim_el)
-            stim = array.query_stimulation_at_electrode(stim_el)
-            
-            if len(stim) == 0:
-                print_error(f"No stimulation unit available for electrode {stim_el}")
-                raise RuntimeError(
-                    f"No stimulation channel can connect to electrode: {stim_el}\n"
-                    f"Please select a neighboring electrode instead."
+            selected_electrode = stim_el
+            attempted = [stim_el]
+            stim_unit_int, reason = try_connect(stim_el)
+
+            if reason:
+                print_warning(
+                    f"Electrode {stim_el} unavailable or conflicts; trying neighbors"
                 )
-            
-            stim_unit_int = int(stim)
-            
-            if stim_unit_int in used_units:
-                print_error(f"Electrode {stim_el} conflicts with existing connection")
-                raise RuntimeError(
-                    f"Two electrodes connected to the same stim unit {stim_unit_int}.\n"
-                    f"This is not allowed. Please select a neighboring electrode of {stim_el}!"
+
+                for neighbor in iter_neighbor_candidates(stim_el):
+                    if neighbor in used_electrodes:
+                        continue
+                    attempted.append(neighbor)
+                    stim_unit_int, reason = try_connect(neighbor)
+                    if not reason:
+                        selected_electrode = neighbor
+                        break
+
+                # If still conflicting, broaden search to any routed candidate electrode
+                if reason and candidate_electrodes:
+                    print_warning(
+                        "No free neighbor; trying additional routed candidates..."
+                    )
+                    for candidate in candidate_electrodes:
+                        if candidate in used_electrodes or candidate in attempted:
+                            continue
+                        attempted.append(candidate)
+                        stim_unit_int, reason = try_connect(candidate)
+                        if not reason:
+                            selected_electrode = candidate
+                            break
+
+            if reason:
+                tried = ", ".join(str(e) for e in attempted)
+                if reason == "unit_in_use":
+                    detail = (
+                        f"Two electrodes connected to the same stim unit {stim_unit_int}.\n"
+                        f"This is not allowed. Please select a neighboring electrode of {stim_el}!"
+                    )
+                else:
+                    detail = (
+                        f"No stimulation channel can connect to electrode: {stim_el}\n"
+                        f"Please select a neighboring electrode instead."
+                    )
+                print_error(f"Connection failed after trying: {tried}")
+                raise RuntimeError(detail)
+
+            electrode_to_unit[selected_electrode] = stim_unit_int
+            used_units.append(stim_unit_int)
+            used_electrodes.add(selected_electrode)
+            resolved_stim_electrodes.append(selected_electrode)
+
+            if selected_electrode != stim_el:
+                print_warning(
+                    f"{position_name}: using neighbor electrode {selected_electrode} instead of {stim_el}"
                 )
-            else:
-                electrode_to_unit[stim_el] = stim_unit_int
-                used_units.append(stim_unit_int)
-                print_success(f"{position_name}: Electrode {stim_el} → Unit {stim_unit_int}")
+            print_success(
+                f"{position_name}: Electrode {selected_electrode} -> Unit {stim_unit_int}"
+            )
         
         except Exception as e:
             print_error(f"Connection failed: {str(e)}")
@@ -280,7 +409,7 @@ def connect_stim_units_to_stim_electrodes(
     print_success(f"All {len(electrode_to_unit)} stimulation units connected")
     print_info(f"Electrode->Unit mapping: {electrode_to_unit}")
     
-    return electrode_to_unit
+    return electrode_to_unit, resolved_stim_electrodes
 
 
 def configure_and_powerup_stim_units(stim_units: List[int]) -> None:
@@ -393,7 +522,9 @@ def create_unit_configuration_commands(
 
 
 def prepare_decoupled_ball_sequences(
-    electrode_to_unit: Dict[int, int]
+    electrode_to_unit: Dict[int, int],
+    stim_electrodes: List[int],
+    position_names: List[str],
 ) -> Dict[str, mx.Sequence]:
     """Prepare all position × frequency combinations (80 sequences)
     
@@ -405,6 +536,10 @@ def prepare_decoupled_ball_sequences(
     ----------
     electrode_to_unit : Dict[int, int]
         Mapping from electrode ID to stimulation unit ID
+    stim_electrodes : List[int]
+        Resolved stimulation electrodes (one per position)
+    position_names : List[str]
+        Names for each stimulation position
         
     Returns
     -------
@@ -417,16 +552,16 @@ def prepare_decoupled_ball_sequences(
     params = STIM_PARAMS["ball_position"]
     frequencies = params["frequencies_Hz"]
     
-    total_sequences = len(SENSORY_STIM_ELECTRODES) * len(frequencies)
+    total_sequences = len(stim_electrodes) * len(frequencies)
     print_info(f"Generating {total_sequences} sequences:")
-    print_info(f"  - {len(SENSORY_STIM_ELECTRODES)} positions × {len(frequencies)} frequencies")
+    print_info(f"  - {len(stim_electrodes)} positions × {len(frequencies)} frequencies")
     
     sequences = {}
     all_unit_ids = list(electrode_to_unit.values())
     
     sequence_count = 0
     
-    for pos_idx, (electrode, position_name) in enumerate(zip(SENSORY_STIM_ELECTRODES, POSITION_NAMES)):
+    for pos_idx, (electrode, position_name) in enumerate(zip(stim_electrodes, position_names)):
         target_unit = electrode_to_unit[electrode]
         
         print_substep(f"Generating sequences for {position_name} (unit {target_unit})...")
@@ -552,7 +687,9 @@ def prepare_miss_feedback_sequence() -> mx.Sequence:
 
 
 def prepare_all_sequences(
-    electrode_to_unit: Dict[int, int]
+    electrode_to_unit: Dict[int, int],
+    stim_electrodes: List[int],
+    position_names: List[str],
 ) -> Dict[str, mx.Sequence]:
     """Prepare all stimulation sequences for the experiment
     
@@ -560,6 +697,10 @@ def prepare_all_sequences(
     ----------
     electrode_to_unit : Dict[int, int]
         Mapping from electrode ID to stimulation unit ID
+    stim_electrodes : List[int]
+        Resolved stimulation electrodes (one per position)
+    position_names : List[str]
+        Names for each stimulation position
         
     Returns
     -------
@@ -569,12 +710,19 @@ def prepare_all_sequences(
     print_step_header(8, "PREPARING ALL STIMULATION SEQUENCES")
     
     print_info("Architecture: Fully decoupled position × frequency")
-    print_info(f"  - 8 positions × 10 frequencies = 80 ball sequences")
+    position_count = len(position_names)
+    frequency_count = len(STIM_PARAMS["ball_position"]["frequencies_Hz"])
+    ball_sequence_count = position_count * frequency_count
+    print_info(
+        f"  - {position_count} positions × {frequency_count} frequencies = {ball_sequence_count} ball sequences"
+    )
     print_info(f"  - 2 feedback sequences (hit/miss)")
-    print_info(f"  - Total: 82 sequences")
+    print_info(f"  - Total: {ball_sequence_count + 2} sequences")
     
     # Prepare decoupled ball position sequences
-    ball_sequences = prepare_decoupled_ball_sequences(electrode_to_unit)
+    ball_sequences = prepare_decoupled_ball_sequences(
+        electrode_to_unit, stim_electrodes, position_names
+    )
     
     # Prepare feedback sequences
     hit_sequence = prepare_hit_feedback_sequence()
@@ -671,6 +819,8 @@ def stop_recording(saving: mx.Saving) -> None:
 def export_cpp_config(
     array: mx.Array,
     electrode_to_unit: Dict[int, int],
+    stim_electrodes: List[int],
+    position_names: List[str],
     sequences: Dict[str, mx.Sequence],
     config_path: str
 ) -> Dict:
@@ -682,6 +832,10 @@ def export_cpp_config(
         Configured array
     electrode_to_unit : Dict[int, int]
         Mapping from electrode ID to stimulation unit ID
+    stim_electrodes : List[int]
+        Resolved stimulation electrodes (one per position)
+    position_names : List[str]
+        Names for each stimulation position
     sequences : Dict[str, mx.Sequence]
         Dictionary of prepared sequences
     config_path : str
@@ -702,7 +856,7 @@ def export_cpp_config(
         sensory_channels = config.get_channels_for_electrodes(SENSORY_RECORDING_ELECTRODES)
         motor_1_channels = config.get_channels_for_electrodes(MOTOR_1_RECORDING_ELECTRODES)
         motor_2_channels = config.get_channels_for_electrodes(MOTOR_2_RECORDING_ELECTRODES)
-        stim_channels = config.get_channels_for_electrodes(SENSORY_STIM_ELECTRODES)
+        stim_channels = config.get_channels_for_electrodes(stim_electrodes)
         
         print_success("Channel mappings retrieved")
         print_info(f"Sensory channels: {len(sensory_channels)}")
@@ -717,18 +871,18 @@ def export_cpp_config(
     print_substep("Building configuration structure...")
     
     # Extract ball position sequence names
-    ball_sequences = [k for k in sequences.keys() if any(pos in k for pos in POSITION_NAMES)]
+    ball_sequences = [k for k in sequences.keys() if any(pos in k for pos in position_names)]
     frequencies = STIM_PARAMS["ball_position"]["frequencies_Hz"]
     
     # Create position->unit mapping
     position_to_unit = {
-        POSITION_NAMES[idx]: electrode_to_unit[electrode]
-        for idx, electrode in enumerate(SENSORY_STIM_ELECTRODES)
+        position_names[idx]: electrode_to_unit[electrode]
+        for idx, electrode in enumerate(stim_electrodes)
     }
     
     # Create sequence lookup table for C++
     sequence_lookup = {}
-    for pos_name in POSITION_NAMES:
+    for pos_name in position_names:
         sequence_lookup[pos_name] = {}
         for freq in frequencies:
             seq_name = f"{pos_name}_{freq}hz"
@@ -747,7 +901,7 @@ def export_cpp_config(
             "sensory_recording": SENSORY_RECORDING_ELECTRODES,
             "motor_1_recording": MOTOR_1_RECORDING_ELECTRODES,
             "motor_2_recording": MOTOR_2_RECORDING_ELECTRODES,
-            "sensory_stimulation": SENSORY_STIM_ELECTRODES
+            "sensory_stimulation": stim_electrodes
         },
         
         "channels": {
@@ -760,7 +914,7 @@ def export_cpp_config(
         "stimulation_units": {
             "electrode_to_unit": electrode_to_unit,
             "position_to_unit": position_to_unit,
-            "positions": POSITION_NAMES
+            "positions": position_names
         },
         
         "stimulation_parameters": STIM_PARAMS,
@@ -768,7 +922,7 @@ def export_cpp_config(
         "sequences": {
             "ball_position": {
                 "total_sequences": len(ball_sequences),
-                "positions": POSITION_NAMES,
+                "positions": position_names,
                 "frequencies": frequencies,
                 "sequence_lookup": sequence_lookup,
                 "usage_example": "pos3_mid_20hz triggers 20Hz at position 3"
@@ -803,7 +957,7 @@ def export_cpp_config(
             "paddle_speed": 1.0,
             "paddle_height": 0.2,
             "update_rate_ms": 10,
-            "num_positions": len(POSITION_NAMES),
+            "num_positions": len(position_names),
             "position_mapping": {
                 "description": "Normalize ball Y position [0,1] to position index [0,7]",
                 "formula": "pos_idx = int(ball_y * 7.99)"
@@ -834,7 +988,7 @@ def export_cpp_config(
         raise
     
     print_info("Decoupled architecture summary:")
-    print_info(f"  - Positions: {len(POSITION_NAMES)}")
+    print_info(f"  - Positions: {len(position_names)}")
     print_info(f"  - Frequencies: {len(frequencies)}")
     print_info(f"  - Total ball sequences: {len(ball_sequences)}")
     print_info(f"  - Position->Unit mapping: {position_to_unit}")
@@ -924,10 +1078,20 @@ def run_pong_experiment(
         MOTOR_2_RECORDING_ELECTRODES
     ))
     
-    array = configure_array(all_recording, SENSORY_STIM_ELECTRODES)
+    stim_candidates = build_stim_candidate_electrodes(SENSORY_STIM_ELECTRODES)
+    array = configure_array(
+        all_recording,
+        stim_candidates,
+        stim_position_electrodes=SENSORY_STIM_ELECTRODES,
+    )
     
     # Step 3: Connect stimulation (returns electrode->unit mapping)
-    electrode_to_unit = connect_stim_units_to_stim_electrodes(SENSORY_STIM_ELECTRODES, array)
+    electrode_to_unit, resolved_stim_electrodes = connect_stim_units_to_stim_electrodes(
+        SENSORY_STIM_ELECTRODES,
+        array,
+        candidate_electrodes=stim_candidates,
+        neighbor_search_radius=STIM_NEIGHBOR_SEARCH_RADIUS,
+    )
     
     # Step 4: Activate wells
     print_step_header(4, "ACTIVATING WELLS")
@@ -985,10 +1149,19 @@ def run_pong_experiment(
         raise
     
     # Step 9: Prepare all decoupled sequences
-    sequences = prepare_all_sequences(electrode_to_unit)
+    sequences = prepare_all_sequences(
+        electrode_to_unit, resolved_stim_electrodes, POSITION_NAMES
+    )
     
     # Step 10: Export configuration for C++
-    cpp_config = export_cpp_config(array, electrode_to_unit, sequences, str(config_path))
+    cpp_config = export_cpp_config(
+        array,
+        electrode_to_unit,
+        resolved_stim_electrodes,
+        POSITION_NAMES,
+        sequences,
+        str(config_path),
+    )
     
     # Step 11: Start recording
     saving = start_recording(session_name, wells)

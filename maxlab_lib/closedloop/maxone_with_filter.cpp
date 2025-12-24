@@ -13,14 +13,15 @@
 #include "gamewindow.h"
 #include "maxlab/maxlab.h"
 #include "spike_detection.h"
-#include "threads/ponggame.h"
+#include "ponggame.h"
 
 #ifdef USE_QT
 #include <QApplication>
 #include <QMetaObject>
 #endif
 
-using clock = std::chrono::steady_clock;
+// Alias to avoid conflicts with `clock()` from <ctime>.
+using SteadyClock = std::chrono::steady_clock;
 
 static std::atomic<bool> g_running{true};
 
@@ -52,7 +53,7 @@ struct RunConfig {
 
 struct AppState {
     AppState(const RunConfig& config, GameWindow* ui_window)
-        : window_start(clock::now()),
+        : window_start(SteadyClock::now()),
           window_len(std::chrono::milliseconds(config.window_ms)),
           blanking(0),
           blanking_frames_after_trigger(config.blanking_frames_after_trigger),
@@ -62,7 +63,7 @@ struct AppState {
         spike_counts.resize(config.channel_count, 0);
     }
 
-    clock::time_point window_start;
+    SteadyClock::time_point window_start;
     std::chrono::milliseconds window_len;
     uint64_t blanking;
     uint64_t blanking_frames_after_trigger;
@@ -76,7 +77,7 @@ static void on_sigint(int) {
     g_running = false;
 }
 
-static void reset_window(AppState& state, clock::time_point now) {
+static void reset_window(AppState& state, SteadyClock::time_point now) {
     state.window_start = now;
     state.detector.resetCounts();
 }
@@ -90,7 +91,7 @@ static int channel_to_quarter(std::size_t channel, std::size_t channel_count) {
     return q;
 }
 
-static void handle_window(AppState& state, clock::time_point now) {
+static void handle_window(AppState& state, SteadyClock::time_point now) {
     state.detector.getCounts(&state.spike_counts);
 
     std::array<uint64_t, 4> quarter_counts{0, 0, 0, 0};
@@ -180,7 +181,7 @@ static int run_game_loop(const RunConfig& config, GameWindow* window) {
             const maxlab::Status status = maxlab::DataStreamerFiltered_receiveNextFrame(&frame_data);
 
             if (status == maxlab::Status::MAXLAB_NO_FRAME) {
-                auto now = clock::now();
+                auto now = SteadyClock::now();
                 if (now - state.window_start >= state.window_len) {
                     handle_window(state, now);
                 }
@@ -194,7 +195,10 @@ static int run_game_loop(const RunConfig& config, GameWindow* window) {
             if (frame_data.frameInfo.corrupted) continue;
             if (frame_data.frameInfo.well_id != config.target_well) continue;
 
-            if (state.blanking > 0) --state.blanking;
+            if (state.blanking > 0) {
+                --state.blanking;
+                continue;
+            }
 
             FrameSamplesView samples;
             if (extract_frame_samples(frame_data, &samples)) {
@@ -206,7 +210,7 @@ static int run_game_loop(const RunConfig& config, GameWindow* window) {
                 }
             }
 
-            auto now = clock::now();
+            auto now = SteadyClock::now();
             if (now - state.window_start >= state.window_len) {
                 handle_window(state, now);
             }
