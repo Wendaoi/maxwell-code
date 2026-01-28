@@ -7,7 +7,7 @@ PongGame::PongGame() {
     gameWidth = 640;
     gameHeight = 480;
     paddleWidth = 0;
-    paddleHeight = 320;
+    paddleHeight = 60;
     ballSize = 0; // 球无体积，作为点处理
     currentCondition = ExperimentCondition::Stimulus;
     resetBall(true);
@@ -19,7 +19,7 @@ void PongGame::resetBall(bool randomVector) {
     ballX = static_cast<float>(gameWidth);  // 球点从右侧边界出发
     ballY = static_cast<float>(gameHeight) / 2.0f;
     if (randomVector) {
-        ballSpeedX = (rand() % 2 == 0) ? -8.0f : -6.0f;  // 向左运动
+        ballSpeedX = -0.5f;  // 向左运动
         ballSpeedY = static_cast<float>((rand() % 10) - 5);
         
     } else {

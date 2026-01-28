@@ -46,9 +46,10 @@ struct RunConfig {
     uint8_t target_well = 0;
     int window_ms = 5;
     uint64_t blanking_frames_after_trigger = 8000;
-    bool show_gui = false;
+    bool show_gui = true;
     std::size_t channel_count = 1024;
     SpikeDetectorConfig detector;
+    bool wait_for_sync = true;
 };
 
 struct AppState {
@@ -91,6 +92,26 @@ static int channel_to_quarter(std::size_t channel, std::size_t channel_count) {
     return q;
 }
 
+static void wait_for_start_signal(bool enable_sync) {
+    if (!enable_sync) {
+        std::cout << "[SYNC] Sync disabled, starting immediately" << std::endl;
+        return;
+    }
+    
+    std::cout << "[SYNC] Waiting for start signal from Python via stdin..." << std::endl;
+    
+    std::string signal;
+    if (std::getline(std::cin, signal)) {
+        if (signal.find("start") != std::string::npos || signal.empty()) {
+            std::cout << "[SYNC] Start signal received, beginning game loop" << std::endl;
+        } else {
+            std::cerr << "[SYNC] Warning: unexpected signal '" << signal << "', starting anyway" << std::endl;
+        }
+    } else {
+        std::cerr << "[SYNC] Warning: failed to read from stdin, starting immediately" << std::endl;
+    }
+}
+
 static void handle_window(AppState& state, SteadyClock::time_point now) {
     state.detector.getCounts(&state.spike_counts);
 
@@ -102,8 +123,8 @@ static void handle_window(AppState& state, SteadyClock::time_point now) {
         }
     }
 
-    const uint64_t sum_up = quarter_counts[0] + quarter_counts[1];   // Q0+Q1
-    const uint64_t sum_down = quarter_counts[2] + quarter_counts[3]; // Q2+Q3
+    const uint64_t sum_up = quarter_counts[0] + quarter_counts[2];   // Q0+Q2
+    const uint64_t sum_down = quarter_counts[1] + quarter_counts[3]; // Q1+Q3
 
     GameEvent event = state.pong_game.update(static_cast<int>(sum_up), static_cast<int>(sum_down));
     if (event == GameEvent::None) {
@@ -128,11 +149,15 @@ static void handle_window(AppState& state, SteadyClock::time_point now) {
         if (state.blanking == 0) {
             maxlab::verifyStatus(maxlab::sendSequence(kSequenceOnHit));
             state.blanking = state.blanking_frames_after_trigger;
+            std::cout << "[DEBUG] BallHitPlayerPaddle - bounces=" << state.pong_game.getBounces() << std::endl;
+            std::cout.flush();
         }
     } else if (event == GameEvent::PlayerMissed) {
         if (state.blanking == 0) {
             maxlab::verifyStatus(maxlab::sendSequence(kSequenceOnMiss));
             state.blanking = state.blanking_frames_after_trigger;
+            std::cout << "[DEBUG] PlayerMissed - bounces=" << state.pong_game.getBounces() << std::endl;
+            std::cout.flush();
         }
     }
 
@@ -169,10 +194,12 @@ static bool extract_frame_samples(const maxlab::FilteredFrameData& frame_data,
 static int run_game_loop(const RunConfig& config, GameWindow* window) {
     try {
         maxlab::checkVersions();
-        maxlab::verifyStatus(maxlab::DataStreamerFiltered_open(maxlab::FilterType::IIR));
 
-        // 允许数据流稳定
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        // 同步点：等待Python发送启动信号
+        // 在打开数据流之前等待，确保MaxLab已配置完成
+        wait_for_start_signal(config.wait_for_sync);
+
+        maxlab::verifyStatus(maxlab::DataStreamerFiltered_open(maxlab::FilterType::IIR));
 
         AppState state(config, window);
 
@@ -239,6 +266,7 @@ static RunConfig parse_args(int argc, char* argv[]) {
     if (argc >= 8) config.detector.min_threshold = static_cast<float>(std::atof(argv[7]));
     if (argc >= 9) config.detector.refractory_samples = std::atoi(argv[8]);
     if (argc >= 10) config.channel_count = static_cast<std::size_t>(std::atoi(argv[9]));
+    if (argc >= 11) config.wait_for_sync = (std::atoi(argv[10]) != 0);
     return config;
 }
 
@@ -246,15 +274,32 @@ int main(int argc, char* argv[]) {
     // argv[1] = targetWell (默认 0)
     // argv[2] = window_ms (默认 5)
     // argv[3] = blanking_frames (默认 8000)
-    // argv[4] = show_gui (默认 0)
+    // argv[4] = show_gui (默认 1)
     // argv[5] = sample_rate_hz (默认 20000)
     // argv[6] = threshold_multiplier (默认 5.0)
     // argv[7] = min_threshold (默认 -20)
     // argv[8] = refractory_samples (默认 1000)
     // argv[9] = channel_count (默认 1024)
+    // argv[10] = wait_for_sync (默认 1)
     const RunConfig config = parse_args(argc, argv);
 
     std::signal(SIGINT, on_sigint);
+
+    std::cout << "[INFO] maxone_with_filter 启动: target_well="
+              << static_cast<int>(config.target_well) << " window_ms=" << config.window_ms
+              << " blanking_frames=" << config.blanking_frames_after_trigger
+              << " show_gui=" << (config.show_gui ? 1 : 0)
+              << " sample_rate_hz=" << config.detector.sample_rate_hz
+              << " threshold_multiplier=" << config.detector.threshold_multiplier
+              << " min_threshold=" << config.detector.min_threshold
+              << " refractory_samples=" << config.detector.refractory_samples
+              << " channel_count=" << config.channel_count;
+#ifdef MAXONE_USE_RAW_SAMPLES
+    std::cout << " sample_mode=raw";
+#else
+    std::cout << " sample_mode=spike_events";
+#endif
+    std::cout << std::endl;
 
 #ifdef USE_QT
     if (config.show_gui) {

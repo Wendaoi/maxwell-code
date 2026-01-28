@@ -15,3 +15,6 @@ maxlab_lib/build/
 .DS_Store
 *.swp
 *.swo
+
+AGENTS.md
+CLAUDE.md

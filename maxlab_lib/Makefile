@@ -12,6 +12,14 @@ CLOSEDLOOP_INCLUDES = -I$(INCLUDE_PATH) -I$(CLOSEDLOOP_INCLUDE_PATH)
 
 LDFLAGS = -L$(LIB_PATH) -lmaxlab -pthread
 
+USE_QT ?= 1
+ifneq ($(strip $(USE_QT)),0)
+QT_CFLAGS = -I/usr/include/x86_64-linux-gnu/qt6 -I/usr/include/x86_64-linux-gnu/qt6/QtCore -I/usr/include/x86_64-linux-gnu/qt6/QtWidgets -I/usr/include/x86_64-linux-gnu/qt6/QtGui -fPIC
+QT_LIBS = -lQt6Core -lQt6Widgets -lQt6Gui
+CXXFLAGS += -DUSE_QT $(QT_CFLAGS)
+LDFLAGS += $(QT_LIBS)
+endif
+
 CLOSEDLOOP_SRCS = maxone_with_filter.cpp spike_detection.cpp ponggame.cpp filter.cpp gamewindow.cpp
 CLOSEDLOOP_OBJS = $(addprefix $(BUILD_PATH)/,$(CLOSEDLOOP_SRCS:.cpp=.o))
 
