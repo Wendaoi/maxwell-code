@@ -1,175 +1,410 @@
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
+#include "cartpole_task.h"
 #include "gamewindow.h"
 #include "maxlab/maxlab.h"
 #include "spike_detection.h"
-#include "ponggame.h"
+#include "training_controller.h"
 
 #ifdef USE_QT
 #include <QApplication>
 #include <QMetaObject>
 #endif
 
-// Alias to avoid conflicts with `clock()` from <ctime>.
 using SteadyClock = std::chrono::steady_clock;
 
-static std::atomic<bool> g_running{true};
-
-static constexpr float kGameWidth = 640.0f;
-static constexpr float kGameHeight = 480.0f;
-
-static const std::array<const char*, 8> kStimPositions = {
-    "pos0",
-    "pos1",
-    "pos2",
-    "pos3",
-    "pos4",
-    "pos5",
-    "pos6",
-    "pos7",
-};
-static const std::array<int, 10> kStimFrequencies = {4, 8, 12, 16, 20, 24, 28, 32, 36, 40};
-static const char* kSequenceOnHit = "hit_feedback";
-static const char* kSequenceOnMiss = "miss_feedback";
+namespace {
+std::atomic<bool> g_running{true};
 
 struct RunConfig {
+    std::string config_path;
     uint8_t target_well = 0;
-    int window_ms = 5;
-    uint64_t blanking_frames_after_trigger = 8000;
+    int read_window_ms = 200;
+    int training_window_ms = 300;
     bool show_gui = true;
-    std::size_t channel_count = 1024;
-    SpikeDetectorConfig detector;
     bool wait_for_sync = true;
+    std::size_t channel_count = 1024;
+    double experiment_duration_s = 900.0;
+    double cycle_duration_s = 900.0;
+    double rest_duration_s = 2700.0;
+    double encoding_scale_a = 7.0;
+    double encoding_scale_b = 0.15;
+    double ema_alpha = 0.2;
+    double force_scale_n = 10.0;
+    double timestep_seconds = 0.2;
+    ClosedLoopMode mode = ClosedLoopMode::CycledAdaptive;
+    SpikeDetectorConfig detector;
+    std::vector<int> decoding_left_channels;
+    std::vector<int> decoding_right_channels;
+    std::string encoding_left_sequence;
+    std::string encoding_right_sequence;
+    std::vector<std::string> training_pattern_names;
+    std::string log_path;
+    std::uint32_t random_seed = 12345;
+};
+
+struct JsonParser {
+    explicit JsonParser(std::string text) : text_(std::move(text)) {}
+
+    std::string stringValue(const std::string& key) const {
+        const std::size_t value_start = valueStart(key);
+        if (text_[value_start] != '"') {
+            throw std::runtime_error("Expected string for key: " + key);
+        }
+        return parseString(value_start);
+    }
+
+    double numberValue(const std::string& key) const {
+        const std::size_t value_start = valueStart(key);
+        std::size_t end = value_start;
+        while (end < text_.size() &&
+               (std::isdigit(static_cast<unsigned char>(text_[end])) || text_[end] == '-' ||
+                text_[end] == '+' || text_[end] == '.' || text_[end] == 'e' || text_[end] == 'E')) {
+            ++end;
+        }
+        return std::stod(text_.substr(value_start, end - value_start));
+    }
+
+    bool boolValue(const std::string& key) const {
+        const std::size_t value_start = valueStart(key);
+        if (text_.compare(value_start, 4, "true") == 0) return true;
+        if (text_.compare(value_start, 5, "false") == 0) return false;
+        throw std::runtime_error("Expected bool for key: " + key);
+    }
+
+    std::vector<int> intArrayValue(const std::string& key) const {
+        return splitNumericArray<int>(key);
+    }
+
+    std::vector<std::string> stringArrayValue(const std::string& key) const {
+        const std::size_t value_start = valueStart(key);
+        if (text_[value_start] != '[') {
+            throw std::runtime_error("Expected string array for key: " + key);
+        }
+        std::vector<std::string> result;
+        std::size_t pos = value_start + 1;
+        while (pos < text_.size()) {
+            pos = skipWhitespace(pos);
+            if (text_[pos] == ']') break;
+            if (text_[pos] != '"') {
+                throw std::runtime_error("Expected string element in array for key: " + key);
+            }
+            result.push_back(parseString(pos));
+            pos = nextAfterString(pos);
+            pos = skipWhitespace(pos);
+            if (text_[pos] == ',') ++pos;
+        }
+        return result;
+    }
+
+private:
+    template <typename T>
+    std::vector<T> splitNumericArray(const std::string& key) const {
+        const std::size_t value_start = valueStart(key);
+        if (text_[value_start] != '[') {
+            throw std::runtime_error("Expected numeric array for key: " + key);
+        }
+        std::vector<T> result;
+        std::size_t pos = value_start + 1;
+        while (pos < text_.size()) {
+            pos = skipWhitespace(pos);
+            if (text_[pos] == ']') break;
+            std::size_t end = pos;
+            while (end < text_.size() &&
+                   (std::isdigit(static_cast<unsigned char>(text_[end])) || text_[end] == '-' ||
+                    text_[end] == '+' || text_[end] == '.')) {
+                ++end;
+            }
+            result.push_back(static_cast<T>(std::stod(text_.substr(pos, end - pos))));
+            pos = skipWhitespace(end);
+            if (text_[pos] == ',') ++pos;
+        }
+        return result;
+    }
+
+    std::size_t valueStart(const std::string& key) const {
+        const std::string pattern = "\"" + key + "\"";
+        const std::size_t key_pos = text_.find(pattern);
+        if (key_pos == std::string::npos) {
+            throw std::runtime_error("Missing key in config: " + key);
+        }
+        const std::size_t colon = text_.find(':', key_pos + pattern.size());
+        if (colon == std::string::npos) {
+            throw std::runtime_error("Missing colon in config for key: " + key);
+        }
+        return skipWhitespace(colon + 1);
+    }
+
+    std::size_t skipWhitespace(std::size_t pos) const {
+        while (pos < text_.size() && std::isspace(static_cast<unsigned char>(text_[pos]))) {
+            ++pos;
+        }
+        return pos;
+    }
+
+    std::string parseString(std::size_t quote_pos) const {
+        std::string out;
+        for (std::size_t pos = quote_pos + 1; pos < text_.size(); ++pos) {
+            const char ch = text_[pos];
+            if (ch == '\\') {
+                ++pos;
+                if (pos >= text_.size()) break;
+                out.push_back(text_[pos]);
+                continue;
+            }
+            if (ch == '"') {
+                return out;
+            }
+            out.push_back(ch);
+        }
+        throw std::runtime_error("Unterminated string in config");
+    }
+
+    std::size_t nextAfterString(std::size_t quote_pos) const {
+        for (std::size_t pos = quote_pos + 1; pos < text_.size(); ++pos) {
+            if (text_[pos] == '\\') {
+                ++pos;
+                continue;
+            }
+            if (text_[pos] == '"') {
+                return pos + 1;
+            }
+        }
+        return text_.size();
+    }
+
+    std::string text_;
+};
+
+struct EpisodeLogger {
+    explicit EpisodeLogger(const std::string& path) : stream(path, std::ios::out | std::ios::trunc) {
+        if (!path.empty() && !stream.is_open()) {
+            throw std::runtime_error("Failed to open log file: " + path);
+        }
+    }
+
+    void writeEpisode(int episode_index,
+                      double duration_s,
+                      double mean_5,
+                      double mean_20,
+                      bool training_delivered,
+                      const std::string& training_sequence,
+                      double theta_rad) {
+        if (!stream.is_open()) return;
+        stream << std::fixed << std::setprecision(6)
+               << "{\"episode_index\":" << episode_index
+               << ",\"time_balanced_s\":" << duration_s
+               << ",\"mean_5_s\":" << mean_5
+               << ",\"mean_20_s\":" << mean_20
+               << ",\"training_delivered\":" << (training_delivered ? "true" : "false")
+               << ",\"training_sequence\":\"" << training_sequence << "\""
+               << ",\"terminal_theta_rad\":" << theta_rad
+               << "}\n";
+        stream.flush();
+    }
+
+    std::ofstream stream;
 };
 
 struct AppState {
     AppState(const RunConfig& config, GameWindow* ui_window)
         : window_start(SteadyClock::now()),
-          window_len(std::chrono::milliseconds(config.window_ms)),
-          blanking(0),
-          blanking_frames_after_trigger(config.blanking_frames_after_trigger),
-          pong_game(),
+          experiment_start(window_start),
+          training_until(window_start),
+          task(config.timestep_seconds),
           detector(config.channel_count, config.detector),
+          trainer(config.training_pattern_names, 0.3, 0.3, 10.0, config.random_seed),
+          logger(config.log_path),
           window(ui_window) {
         spike_counts.resize(config.channel_count, 0);
     }
 
     SteadyClock::time_point window_start;
-    std::chrono::milliseconds window_len;
-    uint64_t blanking;
-    uint64_t blanking_frames_after_trigger;
-    PongGame pong_game;
+    SteadyClock::time_point experiment_start;
+    SteadyClock::time_point training_until;
+    CartpoleTask task;
     SpikeDetector detector;
+    TrainingController trainer;
+    EpisodeLogger logger;
     GameWindow* window;
     std::vector<std::uint32_t> spike_counts;
+    double left_rate = 0.0;
+    double right_rate = 0.0;
+    double left_phase = 0.0;
+    double right_phase = 0.0;
+    bool was_active_phase = false;
+    int episode_index = 0;
 };
 
-static void on_sigint(int) {
+void on_sigint(int) {
     g_running = false;
 }
 
-static void reset_window(AppState& state, SteadyClock::time_point now) {
+void resetWindow(AppState& state, SteadyClock::time_point now) {
     state.window_start = now;
     state.detector.resetCounts();
 }
 
-static int channel_to_quarter(std::size_t channel, std::size_t channel_count) {
-    if (channel_count < 4) return -1;
-    const std::size_t quarter_size = channel_count / 4;
-    if (quarter_size == 0) return -1;
-    int q = static_cast<int>(channel / quarter_size);
-    if (q > 3) q = 3;
-    return q;
+void resetEpisodeState(AppState& state) {
+    state.task.reset();
+    state.left_rate = 0.0;
+    state.right_rate = 0.0;
+    state.left_phase = 0.0;
+    state.right_phase = 0.0;
 }
 
-static void wait_for_start_signal(bool enable_sync) {
+double sumCounts(const std::vector<std::uint32_t>& spike_counts, const std::vector<int>& channels) {
+    double total = 0.0;
+    for (int channel : channels) {
+        if (channel >= 0 && static_cast<std::size_t>(channel) < spike_counts.size()) {
+            total += spike_counts[static_cast<std::size_t>(channel)];
+        }
+    }
+    return total;
+}
+
+bool isActivePhase(const RunConfig& config, double elapsed_seconds) {
+    if (config.mode == ClosedLoopMode::ContinuousAdaptive) {
+        return true;
+    }
+    const double cycle_span = config.cycle_duration_s + config.rest_duration_s;
+    if (cycle_span <= 0.0) {
+        return true;
+    }
+    const double offset = std::fmod(elapsed_seconds, cycle_span);
+    return offset < config.cycle_duration_s;
+}
+
+double clampUnitForce(double force_scale_n, double left_rate, double right_rate) {
+    const double unit_force = std::clamp(left_rate - right_rate, -1.0, 1.0);
+    return unit_force * force_scale_n;
+}
+
+void emitRatePulse(const std::string& sequence_name, double frequency_hz, double dt_seconds, double* phase) {
+    if (sequence_name.empty() || phase == nullptr) return;
+    *phase += frequency_hz * dt_seconds;
+    while (*phase >= 1.0) {
+        maxlab::verifyStatus(maxlab::sendSequence(sequence_name.c_str()));
+        *phase -= 1.0;
+    }
+}
+
+void waitForStartSignal(bool enable_sync) {
     if (!enable_sync) {
         std::cout << "[SYNC] Sync disabled, starting immediately" << std::endl;
         return;
     }
-    
+
     std::cout << "[SYNC] Waiting for start signal from Python via stdin..." << std::endl;
-    
     std::string signal;
     if (std::getline(std::cin, signal)) {
-        if (signal.find("start") != std::string::npos || signal.empty()) {
-            std::cout << "[SYNC] Start signal received, beginning game loop" << std::endl;
-        } else {
-            std::cerr << "[SYNC] Warning: unexpected signal '" << signal << "', starting anyway" << std::endl;
-        }
+        std::cout << "[SYNC] Start signal received, beginning cartpole loop" << std::endl;
     } else {
         std::cerr << "[SYNC] Warning: failed to read from stdin, starting immediately" << std::endl;
     }
 }
 
-static void handle_window(AppState& state, SteadyClock::time_point now) {
+void updateWindow(AppState& state, const RunConfig& config, SteadyClock::time_point now) {
     state.detector.getCounts(&state.spike_counts);
 
-    std::array<uint64_t, 4> quarter_counts{0, 0, 0, 0};
-    for (std::size_t ch = 0; ch < state.spike_counts.size(); ++ch) {
-        const int q = channel_to_quarter(ch, state.spike_counts.size());
-        if (q >= 0 && q < 4) {
-            quarter_counts[static_cast<std::size_t>(q)] += state.spike_counts[ch];
-        }
+    const double elapsed_seconds =
+        std::chrono::duration<double>(now - state.experiment_start).count();
+    const bool active_phase = isActivePhase(config, elapsed_seconds);
+
+    if (!active_phase && state.was_active_phase) {
+        resetEpisodeState(state);
+    }
+    state.was_active_phase = active_phase;
+
+    if (elapsed_seconds >= config.experiment_duration_s) {
+        g_running = false;
+        return;
     }
 
-    const uint64_t sum_up = quarter_counts[0] + quarter_counts[2];   // Q0+Q2
-    const uint64_t sum_down = quarter_counts[1] + quarter_counts[3]; // Q1+Q3
-
-    GameEvent event = state.pong_game.update(static_cast<int>(sum_up), static_cast<int>(sum_down));
-    if (event == GameEvent::None) {
-        if (state.pong_game.getCondition() != ExperimentCondition::Rest) {
-            const float ball_x = static_cast<float>(state.pong_game.getBallX());
-            const float ball_y = static_cast<float>(state.pong_game.getBallY());
-            const float norm_x = std::clamp(ball_x / kGameWidth, 0.0f, 1.0f);
-            const float norm_y = std::clamp(ball_y / kGameHeight, 0.0f, 1.0f);
-
-            int pos_idx = static_cast<int>(norm_y * 7.99f);
-            int freq_idx = static_cast<int>((1.0f - norm_x) * 9.99f);
-            pos_idx = std::clamp(pos_idx, 0, static_cast<int>(kStimPositions.size() - 1));
-            freq_idx = std::clamp(freq_idx, 0, static_cast<int>(kStimFrequencies.size() - 1));
-
-            const std::size_t pos_index = static_cast<std::size_t>(pos_idx);
-            const std::size_t freq_index = static_cast<std::size_t>(freq_idx);
-            std::string seq_name = std::string(kStimPositions[pos_index]) + "_" +
-                                   std::to_string(kStimFrequencies[freq_index]) + "hz";
-            maxlab::verifyStatus(maxlab::sendSequence(seq_name.c_str()));
+    if (!active_phase) {
+        if (state.window != nullptr) {
+            state.window->setState(0.0f, 0.0f, 0.0f, 0.0f);
         }
-    } else if (event == GameEvent::BallHitPlayerPaddle) {
-        if (state.blanking == 0) {
-            maxlab::verifyStatus(maxlab::sendSequence(kSequenceOnHit));
-            state.blanking = state.blanking_frames_after_trigger;
-            std::cout << "[DEBUG] BallHitPlayerPaddle - bounces=" << state.pong_game.getBounces() << std::endl;
-            std::cout.flush();
-        }
-    } else if (event == GameEvent::PlayerMissed) {
-        if (state.blanking == 0) {
-            maxlab::verifyStatus(maxlab::sendSequence(kSequenceOnMiss));
-            state.blanking = state.blanking_frames_after_trigger;
-            std::cout << "[DEBUG] PlayerMissed - bounces=" << state.pong_game.getBounces() << std::endl;
-            std::cout.flush();
-        }
+        resetWindow(state, now);
+        return;
     }
+
+    if (now < state.training_until) {
+        resetWindow(state, now);
+        return;
+    }
+
+    const double left_count = sumCounts(state.spike_counts, config.decoding_left_channels);
+    const double right_count = sumCounts(state.spike_counts, config.decoding_right_channels);
+    state.left_rate = config.ema_alpha * state.left_rate + (1.0 - config.ema_alpha) * left_count;
+    state.right_rate = config.ema_alpha * state.right_rate + (1.0 - config.ema_alpha) * right_count;
+
+    const double force_newtons = clampUnitForce(config.force_scale_n, state.left_rate, state.right_rate);
+    const bool terminal = state.task.step(force_newtons);
+
+    const double theta = state.task.getPoleAngleRad();
+    const double frequency_left =
+        config.encoding_scale_a * std::pow(config.encoding_scale_b - std::sin(theta), 2.0);
+    const double frequency_right =
+        config.encoding_scale_a * std::pow(config.encoding_scale_b + std::sin(theta), 2.0);
+
+    emitRatePulse(config.encoding_left_sequence, frequency_left, config.timestep_seconds, &state.left_phase);
+    emitRatePulse(config.encoding_right_sequence, frequency_right, config.timestep_seconds, &state.right_phase);
 
     if (state.window != nullptr) {
         state.window->setState(
-            state.pong_game.getPaddle1Y(),
-            state.pong_game.getBallX(),
-            state.pong_game.getBallY(),
-            state.pong_game.getPaddleHeight());
+            static_cast<float>(state.task.getCartPosition()),
+            static_cast<float>(theta),
+            static_cast<float>(state.task.getTimeBalanced()),
+            static_cast<float>(force_newtons));
     }
 
-    reset_window(state, now);
+    if (terminal) {
+        const double reward_seconds = state.task.getTimeBalanced();
+        const TrainingDecision decision = state.trainer.onEpisodeEnd(reward_seconds);
+        ++state.episode_index;
+        state.logger.writeEpisode(
+            state.episode_index,
+            reward_seconds,
+            decision.mean_5,
+            decision.mean_20,
+            decision.delivered,
+            decision.sequence_name,
+            theta);
+
+        std::cout << std::fixed << std::setprecision(2)
+                  << "[EPISODE] index=" << state.episode_index
+                  << " duration_s=" << reward_seconds
+                  << " mean5=" << decision.mean_5
+                  << " mean20=" << decision.mean_20
+                  << " training=" << (decision.delivered ? decision.sequence_name : "none")
+                  << std::endl;
+
+        if (decision.delivered) {
+            maxlab::verifyStatus(maxlab::sendSequence(decision.sequence_name.c_str()));
+            state.training_until = now + std::chrono::milliseconds(config.training_window_ms);
+        }
+
+        resetEpisodeState(state);
+    }
+
+    resetWindow(state, now);
 }
 
 struct FrameSamplesView {
@@ -177,10 +412,8 @@ struct FrameSamplesView {
     std::size_t channel_count = 0;
 };
 
-static bool extract_frame_samples(const maxlab::FilteredFrameData& frame_data,
-                                  FrameSamplesView* out) {
+bool extractFrameSamples(const maxlab::FilteredFrameData& frame_data, FrameSamplesView* out) {
 #ifdef MAXONE_USE_RAW_SAMPLES
-    // TODO: Wire the raw/filtered sample pointer and channel count from maxlab headers.
     out->samples = frame_data.analogSamples;
     out->channel_count = frame_data.frameInfo.channelCount;
     return (out->samples != nullptr && out->channel_count > 0);
@@ -191,14 +424,55 @@ static bool extract_frame_samples(const maxlab::FilteredFrameData& frame_data,
 #endif
 }
 
-static int run_game_loop(const RunConfig& config, GameWindow* window) {
+RunConfig loadConfig(const std::string& config_path) {
+    std::ifstream stream(config_path);
+    if (!stream.is_open()) {
+        throw std::runtime_error("Unable to open config file: " + config_path);
+    }
+
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+    JsonParser parser(buffer.str());
+
+    RunConfig config;
+    config.config_path = config_path;
+    config.target_well = static_cast<uint8_t>(parser.numberValue("target_well"));
+    config.read_window_ms = static_cast<int>(parser.numberValue("read_window_ms"));
+    config.training_window_ms = static_cast<int>(parser.numberValue("training_window_ms"));
+    config.show_gui = parser.boolValue("show_gui");
+    config.wait_for_sync = parser.boolValue("wait_for_sync");
+    config.channel_count = static_cast<std::size_t>(parser.numberValue("channel_count"));
+    config.experiment_duration_s = parser.numberValue("experiment_duration_s");
+    config.cycle_duration_s = parser.numberValue("cycle_duration_s");
+    config.rest_duration_s = parser.numberValue("rest_duration_s");
+    config.encoding_scale_a = parser.numberValue("encoding_scale_a");
+    config.encoding_scale_b = parser.numberValue("encoding_scale_b");
+    config.ema_alpha = parser.numberValue("ema_alpha");
+    config.force_scale_n = parser.numberValue("force_scale_n");
+    config.detector.sample_rate_hz = parser.numberValue("sample_rate_hz");
+    config.detector.threshold_multiplier = static_cast<float>(parser.numberValue("threshold_multiplier"));
+    config.detector.min_threshold = static_cast<float>(parser.numberValue("min_threshold"));
+    config.detector.refractory_samples = static_cast<int>(parser.numberValue("refractory_samples"));
+    config.decoding_left_channels = parser.intArrayValue("decoding_left_channels");
+    config.decoding_right_channels = parser.intArrayValue("decoding_right_channels");
+    config.encoding_left_sequence = parser.stringValue("encoding_left_sequence");
+    config.encoding_right_sequence = parser.stringValue("encoding_right_sequence");
+    config.training_pattern_names = parser.stringArrayValue("training_pattern_names");
+    config.log_path = parser.stringValue("log_path");
+    config.random_seed = static_cast<std::uint32_t>(parser.numberValue("random_seed"));
+
+    const std::string mode = parser.stringValue("mode");
+    config.mode = (mode == "continuous_adaptive")
+                      ? ClosedLoopMode::ContinuousAdaptive
+                      : ClosedLoopMode::CycledAdaptive;
+    config.timestep_seconds = static_cast<double>(config.read_window_ms) / 1000.0;
+    return config;
+}
+
+int runGameLoop(const RunConfig& config, GameWindow* window) {
     try {
         maxlab::checkVersions();
-
-        // 同步点：等待Python发送启动信号
-        // 在打开数据流之前等待，确保MaxLab已配置完成
-        wait_for_start_signal(config.wait_for_sync);
-
+        waitForStartSignal(config.wait_for_sync);
         maxlab::verifyStatus(maxlab::DataStreamerFiltered_open(maxlab::FilterType::IIR));
 
         AppState state(config, window);
@@ -208,9 +482,9 @@ static int run_game_loop(const RunConfig& config, GameWindow* window) {
             const maxlab::Status status = maxlab::DataStreamerFiltered_receiveNextFrame(&frame_data);
 
             if (status == maxlab::Status::MAXLAB_NO_FRAME) {
-                auto now = SteadyClock::now();
-                if (now - state.window_start >= state.window_len) {
-                    handle_window(state, now);
+                const auto now = SteadyClock::now();
+                if (now - state.window_start >= std::chrono::milliseconds(config.read_window_ms)) {
+                    updateWindow(state, config, now);
                 }
                 continue;
             }
@@ -218,17 +492,11 @@ static int run_game_loop(const RunConfig& config, GameWindow* window) {
             if (status != maxlab::Status::MAXLAB_OK) {
                 continue;
             }
-
             if (frame_data.frameInfo.corrupted) continue;
             if (frame_data.frameInfo.well_id != config.target_well) continue;
 
-            if (state.blanking > 0) {
-                --state.blanking;
-                continue;
-            }
-
             FrameSamplesView samples;
-            if (extract_frame_samples(frame_data, &samples)) {
+            if (extractFrameSamples(frame_data, &samples)) {
                 state.detector.processFrame(samples.samples, samples.channel_count);
             } else {
                 for (uint64_t i = 0; i < frame_data.spikeCount; ++i) {
@@ -237,9 +505,9 @@ static int run_game_loop(const RunConfig& config, GameWindow* window) {
                 }
             }
 
-            auto now = SteadyClock::now();
-            if (now - state.window_start >= state.window_len) {
-                handle_window(state, now);
+            const auto now = SteadyClock::now();
+            if (now - state.window_start >= std::chrono::milliseconds(config.read_window_ms)) {
+                updateWindow(state, config, now);
             }
         }
 
@@ -251,55 +519,25 @@ static int run_game_loop(const RunConfig& config, GameWindow* window) {
         return 1;
     }
 }
-
-static RunConfig parse_args(int argc, char* argv[]) {
-    RunConfig config;
-    if (argc >= 2) config.target_well = static_cast<uint8_t>(std::atoi(argv[1]));
-    if (argc >= 3) config.window_ms = (std::max)(1, std::atoi(argv[2]));
-    if (argc >= 4) {
-        config.blanking_frames_after_trigger =
-            static_cast<uint64_t>(std::strtoull(argv[3], nullptr, 10));
-    }
-    if (argc >= 5) config.show_gui = (std::atoi(argv[4]) != 0);
-    if (argc >= 6) config.detector.sample_rate_hz = std::atof(argv[5]);
-    if (argc >= 7) config.detector.threshold_multiplier = static_cast<float>(std::atof(argv[6]));
-    if (argc >= 8) config.detector.min_threshold = static_cast<float>(std::atof(argv[7]));
-    if (argc >= 9) config.detector.refractory_samples = std::atoi(argv[8]);
-    if (argc >= 10) config.channel_count = static_cast<std::size_t>(std::atoi(argv[9]));
-    if (argc >= 11) config.wait_for_sync = (std::atoi(argv[10]) != 0);
-    return config;
-}
+} // namespace
 
 int main(int argc, char* argv[]) {
-    // argv[1] = targetWell (默认 0)
-    // argv[2] = window_ms (默认 5)
-    // argv[3] = blanking_frames (默认 8000)
-    // argv[4] = show_gui (默认 1)
-    // argv[5] = sample_rate_hz (默认 20000)
-    // argv[6] = threshold_multiplier (默认 5.0)
-    // argv[7] = min_threshold (默认 -20)
-    // argv[8] = refractory_samples (默认 1000)
-    // argv[9] = channel_count (默认 1024)
-    // argv[10] = wait_for_sync (默认 1)
-    const RunConfig config = parse_args(argc, argv);
+    if (argc < 2) {
+        std::cerr << "Usage: maxone_with_filter <config.json>" << std::endl;
+        return 2;
+    }
 
+    const RunConfig config = loadConfig(argv[1]);
     std::signal(SIGINT, on_sigint);
 
-    std::cout << "[INFO] maxone_with_filter 启动: target_well="
-              << static_cast<int>(config.target_well) << " window_ms=" << config.window_ms
-              << " blanking_frames=" << config.blanking_frames_after_trigger
-              << " show_gui=" << (config.show_gui ? 1 : 0)
-              << " sample_rate_hz=" << config.detector.sample_rate_hz
-              << " threshold_multiplier=" << config.detector.threshold_multiplier
-              << " min_threshold=" << config.detector.min_threshold
-              << " refractory_samples=" << config.detector.refractory_samples
-              << " channel_count=" << config.channel_count;
-#ifdef MAXONE_USE_RAW_SAMPLES
-    std::cout << " sample_mode=raw";
-#else
-    std::cout << " sample_mode=spike_events";
-#endif
-    std::cout << std::endl;
+    std::cout << "[INFO] cartpole loop config=" << config.config_path
+              << " target_well=" << static_cast<int>(config.target_well)
+              << " read_window_ms=" << config.read_window_ms
+              << " training_window_ms=" << config.training_window_ms
+              << " mode="
+              << (config.mode == ClosedLoopMode::ContinuousAdaptive ? "continuous_adaptive" : "cycled_adaptive")
+              << " duration_s=" << config.experiment_duration_s
+              << std::endl;
 
 #ifdef USE_QT
     if (config.show_gui) {
@@ -308,7 +546,7 @@ int main(int argc, char* argv[]) {
         window.show();
 
         std::thread worker([&]() {
-            run_game_loop(config, &window);
+            runGameLoop(config, &window);
             QMetaObject::invokeMethod(&app, "quit", Qt::QueuedConnection);
         });
 
@@ -323,5 +561,5 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    return run_game_loop(config, nullptr);
+    return runGameLoop(config, nullptr);
 }

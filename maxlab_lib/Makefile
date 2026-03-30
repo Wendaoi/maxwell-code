@@ -20,7 +20,7 @@ CXXFLAGS += -DUSE_QT $(QT_CFLAGS)
 LDFLAGS += $(QT_LIBS)
 endif
 
-CLOSEDLOOP_SRCS = maxone_with_filter.cpp spike_detection.cpp ponggame.cpp filter.cpp gamewindow.cpp
+CLOSEDLOOP_SRCS = maxone_with_filter.cpp spike_detection.cpp cartpole_task.cpp training_controller.cpp filter.cpp gamewindow.cpp
 CLOSEDLOOP_OBJS = $(addprefix $(BUILD_PATH)/,$(CLOSEDLOOP_SRCS:.cpp=.o))
 
 all: example_raw example_filtered maxone_with_filter
