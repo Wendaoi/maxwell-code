@@ -1,5 +1,6 @@
 #ifdef USE_QT
 #include "gamewindow.h"
+#include "ponggame.h"
 
 #include <QPainter>
 #include <QTimer>
@@ -11,7 +12,7 @@ GameWindow::GameWindow(QWidget* parent)
       ball_y_(0),
       paddle_h_(0) {
     setWindowTitle("PongGame Viewer");
-    resize(640, 480);
+    resize(ponggame_defaults::kGameWidth, ponggame_defaults::kGameHeight);
 
     auto* timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, QOverload<>::of(&QWidget::update));
@@ -33,8 +34,10 @@ void GameWindow::paintEvent(QPaintEvent*) {
 
     const int w = width();
     const int h = height();
-    const float sx = static_cast<float>(w) / 640.0f;
-    const float sy = static_cast<float>(h) / 480.0f;
+    const float sx = static_cast<float>(w) /
+                     static_cast<float>(ponggame_defaults::kGameWidth);
+    const float sy = static_cast<float>(h) /
+                     static_cast<float>(ponggame_defaults::kGameHeight);
 
     const int paddleY = static_cast<int>(paddle_y_.load(std::memory_order_relaxed) * sy);
     const int paddleH = static_cast<int>(paddle_h_.load(std::memory_order_relaxed) * sy);

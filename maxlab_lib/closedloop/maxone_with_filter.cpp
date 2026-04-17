@@ -1,327 +1,695 @@
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <random>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include <sys/select.h>
+#include <unistd.h>
+
 #include "gamewindow.h"
 #include "maxlab/maxlab.h"
-#include "spike_detection.h"
+#include "motor_decoder.h"
 #include "ponggame.h"
+#include "runtime_config.h"
+#include "runtime_logging.h"
+#include "runtime_timing.h"
+#include "spike_detection.h"
 
 #ifdef USE_QT
 #include <QApplication>
 #include <QMetaObject>
 #endif
 
-// Alias to avoid conflicts with `clock()` from <ctime>.
 using SteadyClock = std::chrono::steady_clock;
 
 static std::atomic<bool> g_running{true};
 
-static constexpr float kGameWidth = 640.0f;
-static constexpr float kGameHeight = 480.0f;
-
-static const std::array<const char*, 8> kStimPositions = {
-    "pos0",
-    "pos1",
-    "pos2",
-    "pos3",
-    "pos4",
-    "pos5",
-    "pos6",
-    "pos7",
-};
-static const std::array<int, 10> kStimFrequencies = {4, 8, 12, 16, 20, 24, 28, 32, 36, 40};
-static const char* kSequenceOnHit = "hit_feedback";
-static const char* kSequenceOnMiss = "miss_feedback";
-
 struct RunConfig {
+    std::string config_path;
+    RuntimeConfig runtime;
     uint8_t target_well = 0;
-    int window_ms = 5;
-    uint64_t blanking_frames_after_trigger = 8000;
     bool show_gui = true;
+    bool wait_for_sync = true;
     std::size_t channel_count = 1024;
     SpikeDetectorConfig detector;
-    bool wait_for_sync = true;
 };
+
+static const char* condition_to_string(RuntimeCondition condition) {
+    switch (condition) {
+        case RuntimeCondition::Stimulus:
+            return "STIM";
+        case RuntimeCondition::Silent:
+            return "SILENT";
+        case RuntimeCondition::NoFeedback:
+            return "NO_FEEDBACK";
+        case RuntimeCondition::Rest:
+            return "REST";
+    }
+    return "UNKNOWN";
+}
+
+static const char* stream_mode_to_string(StreamMode mode) {
+    switch (mode) {
+        case StreamMode::Raw:
+            return "raw";
+        case StreamMode::Filtered:
+            return "filtered";
+    }
+    return "unknown";
+}
+
+static ExperimentCondition to_experiment_condition(RuntimeCondition condition) {
+    switch (condition) {
+        case RuntimeCondition::Stimulus:
+            return ExperimentCondition::Stimulus;
+        case RuntimeCondition::Silent:
+            return ExperimentCondition::Silent;
+        case RuntimeCondition::NoFeedback:
+            return ExperimentCondition::NoFeedback;
+        case RuntimeCondition::Rest:
+            return ExperimentCondition::Rest;
+    }
+    return ExperimentCondition::Stimulus;
+}
+
+static std::vector<std::size_t> to_size_t_channels(const std::vector<int>& channels) {
+    std::vector<std::size_t> result;
+    result.reserve(channels.size());
+    for (int channel : channels) {
+        if (channel >= 0) {
+            result.push_back(static_cast<std::size_t>(channel));
+        }
+    }
+    return result;
+}
+
+static std::size_t infer_channel_count(const RuntimeConfig& runtime) {
+    std::size_t channel_count = maxlab::RawFrameData::amplitudeCount;
+    auto include_channels = [&channel_count](const std::vector<int>& channels) {
+        for (int channel : channels) {
+            if (channel >= 0) {
+                channel_count = std::max(channel_count, static_cast<std::size_t>(channel) + 1);
+            }
+        }
+    };
+    include_channels(runtime.motor_up_channels);
+    include_channels(runtime.motor_down_channels);
+    include_channels(runtime.stim_channels);
+    return channel_count;
+}
+
+static MotorDecoderConfig make_decoder_config(const RuntimeConfig& runtime) {
+    MotorDecoderConfig config;
+    config.up_channels = to_size_t_channels(runtime.motor_up_channels);
+    config.down_channels = to_size_t_channels(runtime.motor_down_channels);
+    config.sample_rate_hz = runtime.sample_rate_hz;
+    config.window_ms = runtime.window_ms;
+    config.target_rate_hz = runtime.motor_gain_target_hz;
+    return config;
+}
 
 struct AppState {
     AppState(const RunConfig& config, GameWindow* ui_window)
-        : window_start(SteadyClock::now()),
-          window_len(std::chrono::milliseconds(config.window_ms)),
-          blanking(0),
-          blanking_frames_after_trigger(config.blanking_frames_after_trigger),
+        : runtime(config.runtime),
+          samples_per_game_window(samples_per_window(runtime.sample_rate_hz, runtime.window_ms)),
           pong_game(),
           detector(config.channel_count, config.detector),
-          window(ui_window) {
+          motor_decoder(make_decoder_config(runtime)),
+          logger(runtime.runtime_events_path,
+                 runtime.window_samples_path,
+                 runtime.quality_summary_path),
+          window(ui_window),
+          rng(std::random_device{}()) {
         spike_counts.resize(config.channel_count, 0);
+        pong_game.setCondition(to_experiment_condition(runtime.condition));
     }
 
-    SteadyClock::time_point window_start;
-    std::chrono::milliseconds window_len;
-    uint64_t blanking;
-    uint64_t blanking_frames_after_trigger;
+    RuntimeConfig runtime;
+    uint64_t samples_per_game_window;
+    uint64_t artifact_blanking_samples = 0;
+    uint64_t pause_until_sample = 0;
+    uint64_t suppress_sensory_until_sample = 0;
+    uint64_t next_sensory_sample = 0;
+    uint64_t phase_start_frame = 0;
+    uint64_t window_start_frame = 0;
+    uint64_t total_frames_seen = 0;
+    uint64_t rally_id = 0;
+    int last_sensory_pos = -1;
+    int last_sensory_hz = 0;
+    std::string phase = "pre_rest";
+    bool sensory_schedule_initialized = false;
     PongGame pong_game;
     SpikeDetector detector;
+    MotorDecoder motor_decoder;
+    RuntimeLogger logger;
     GameWindow* window;
     std::vector<std::uint32_t> spike_counts;
+    uint64_t accepted_frames_in_window = 0;
+    uint64_t accepted_stream_frames = 0;
+    std::mt19937 rng;
 };
 
 static void on_sigint(int) {
     g_running = false;
 }
 
-static void reset_window(AppState& state, SteadyClock::time_point now) {
-    state.window_start = now;
+static void reset_window(AppState& state) {
     state.detector.resetCounts();
+    state.accepted_frames_in_window = 0;
+    state.window_start_frame = state.accepted_stream_frames;
 }
 
-static int channel_to_quarter(std::size_t channel, std::size_t channel_count) {
-    if (channel_count < 4) return -1;
-    const std::size_t quarter_size = channel_count / 4;
-    if (quarter_size == 0) return -1;
-    int q = static_cast<int>(channel / quarter_size);
-    if (q > 3) q = 3;
-    return q;
+static void update_window(AppState& state) {
+    if (state.window != nullptr) {
+        state.window->setState(state.pong_game.getPaddle1Y(),
+                               state.pong_game.getBallX(),
+                               state.pong_game.getBallY(),
+                               state.pong_game.getPaddleHeight());
+    }
 }
 
-static void wait_for_start_signal(bool enable_sync) {
+static bool poll_start_signal(bool enable_sync) {
     if (!enable_sync) {
-        std::cout << "[SYNC] Sync disabled, starting immediately" << std::endl;
+        return true;
+    }
+
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(STDIN_FILENO, &read_fds);
+    timeval timeout;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+
+    const int ready = select(STDIN_FILENO + 1, &read_fds, nullptr, nullptr, &timeout);
+    if (ready <= 0 || !FD_ISSET(STDIN_FILENO, &read_fds)) {
+        return false;
+    }
+
+    std::string signal;
+    if (!std::getline(std::cin, signal)) {
+        std::cerr << "[SYNC] stdin closed; starting game loop" << std::endl;
+        return true;
+    }
+    if (signal.find("start") != std::string::npos || signal.empty()) {
+        std::cout << "[SYNC] Start signal received" << std::endl;
+        return true;
+    }
+
+    std::cerr << "[SYNC] Unexpected signal '" << signal << "'; starting anyway" << std::endl;
+    return true;
+}
+
+static std::size_t frequency_index_for_ball_x(int ball_x,
+                                              int game_width,
+                                              std::size_t frequency_count) {
+    if (frequency_count == 0 || game_width <= 0) {
+        return 0;
+    }
+
+    const double norm_x =
+        std::clamp(static_cast<double>(ball_x) / static_cast<double>(game_width), 0.0, 1.0);
+    const double leftward = 1.0 - norm_x;
+    const std::size_t index = static_cast<std::size_t>(leftward * frequency_count);
+    return std::min(index, frequency_count - 1);
+}
+
+static bool can_send_sensory(const AppState& state) {
+    return state.runtime.condition != RuntimeCondition::Rest &&
+           state.artifact_blanking_samples == 0 &&
+           state.accepted_stream_frames >= state.pause_until_sample &&
+           state.accepted_stream_frames >= state.suppress_sensory_until_sample;
+}
+
+static void send_sequence_with_blanking(AppState& state, const std::string& sequence_name) {
+    if (sequence_name.empty()) {
         return;
     }
-    
-    std::cout << "[SYNC] Waiting for start signal from Python via stdin..." << std::endl;
-    
-    std::string signal;
-    if (std::getline(std::cin, signal)) {
-        if (signal.find("start") != std::string::npos || signal.empty()) {
-            std::cout << "[SYNC] Start signal received, beginning game loop" << std::endl;
-        } else {
-            std::cerr << "[SYNC] Warning: unexpected signal '" << signal << "', starting anyway" << std::endl;
+
+    const maxlab::Status status = maxlab::sendSequence(sequence_name.c_str());
+    if (status != maxlab::Status::MAXLAB_OK) {
+        throw std::runtime_error("sendSequence failed for '" + sequence_name +
+                                 "' with status " +
+                                 std::to_string(static_cast<int>(status)));
+    }
+    state.artifact_blanking_samples =
+        static_cast<uint64_t>(std::max(0, state.runtime.artifact_blanking_samples));
+    std::cout << "[STIM] sendSequence(" << sequence_name << ")" << std::endl;
+    state.logger.logEvent("sequence_sent",
+                          state.accepted_stream_frames,
+                          state.phase,
+                          sequence_name);
+}
+
+static void maybe_send_sensory(AppState& state) {
+    if (state.runtime.positions.empty() ||
+        state.runtime.frequencies.empty()) {
+        return;
+    }
+
+    const int pos_idx = state.pong_game.getSensoryStimZone();
+    if (pos_idx < 0) {
+        return;
+    }
+
+    const std::size_t position_index =
+        std::min(static_cast<std::size_t>(pos_idx), state.runtime.positions.size() - 1);
+    const std::size_t frequency_index =
+        frequency_index_for_ball_x(state.pong_game.getBallX(),
+                                   state.pong_game.getGameWidth(),
+                                   state.runtime.frequencies.size());
+    const int frequency_hz = state.runtime.frequencies[frequency_index];
+    state.last_sensory_pos = static_cast<int>(position_index);
+    state.last_sensory_hz = frequency_hz;
+    const uint64_t interval_samples =
+        samples_per_sensory_interval(state.runtime.sample_rate_hz, frequency_hz);
+
+    if (!state.sensory_schedule_initialized) {
+        state.next_sensory_sample = state.accepted_stream_frames + interval_samples;
+        state.sensory_schedule_initialized = true;
+        return;
+    }
+
+    if (!can_send_sensory(state)) {
+        if (state.accepted_stream_frames >= state.next_sensory_sample) {
+            state.next_sensory_sample = state.accepted_stream_frames + interval_samples;
         }
-    } else {
-        std::cerr << "[SYNC] Warning: failed to read from stdin, starting immediately" << std::endl;
+        return;
+    }
+
+    if (state.accepted_stream_frames < state.next_sensory_sample) {
+        return;
+    }
+
+    const std::string& sequence_name = state.runtime.sequence_for(position_index, frequency_index);
+    send_sequence_with_blanking(state, sequence_name);
+    state.logger.logEvent("sensory_stimulus",
+                          state.accepted_stream_frames,
+                          state.phase,
+                          sequence_name);
+    state.next_sensory_sample = state.accepted_stream_frames + interval_samples;
+}
+
+static void handle_hit(AppState& state) {
+    std::cout << "[EVENT] BallHitPlayerPaddle bounces=" << state.pong_game.getBounces()
+              << std::endl;
+    state.logger.logEvent("hit",
+                          state.accepted_stream_frames,
+                          state.phase,
+                          "bounces=" + std::to_string(state.pong_game.getBounces()));
+
+    if (state.runtime.condition == RuntimeCondition::Stimulus) {
+        send_sequence_with_blanking(state, state.runtime.hit_feedback_sequence);
+        state.suppress_sensory_until_sample =
+            state.accepted_stream_frames +
+            samples_for_duration_ms(state.runtime.sample_rate_hz,
+                                    state.runtime.hit_sensory_suppression_ms);
     }
 }
 
-static void handle_window(AppState& state, SteadyClock::time_point now) {
+static void handle_miss(AppState& state) {
+    std::cout << "[EVENT] PlayerMissed bounces=" << state.pong_game.getBounces() << std::endl;
+    state.logger.logEvent("miss",
+                          state.accepted_stream_frames,
+                          state.phase,
+                          "bounces=" + std::to_string(state.pong_game.getBounces()) +
+                              ",rally_id=" + std::to_string(state.rally_id));
+    ++state.rally_id;
+
+    if (state.runtime.condition == RuntimeCondition::Stimulus &&
+        !state.runtime.miss_feedback_sequences.empty()) {
+        std::uniform_int_distribution<std::size_t> dist(
+            0, state.runtime.miss_feedback_sequences.size() - 1);
+        send_sequence_with_blanking(state, state.runtime.miss_feedback_sequences[dist(state.rng)]);
+    }
+
+    if (state.runtime.condition == RuntimeCondition::Stimulus ||
+        state.runtime.condition == RuntimeCondition::Silent) {
+        const int pause_ms = combined_miss_pause_ms(state.runtime.miss_feedback_duration_ms,
+                                                    state.runtime.miss_pause_ms);
+        state.pause_until_sample =
+            state.accepted_stream_frames +
+            samples_for_duration_ms(state.runtime.sample_rate_hz, pause_ms);
+        state.logger.logEvent("pause",
+                              state.accepted_stream_frames,
+                              state.phase,
+                              "duration_ms=" + std::to_string(pause_ms));
+    }
+}
+
+static void handle_window(AppState& state) {
     state.detector.getCounts(&state.spike_counts);
+    const MotorActivity motor = state.motor_decoder.decodeWindow(state.spike_counts);
+    const uint64_t frame_start = state.window_start_frame;
+    const uint64_t frame_end = state.accepted_stream_frames;
 
-    std::array<uint64_t, 4> quarter_counts{0, 0, 0, 0};
-    for (std::size_t ch = 0; ch < state.spike_counts.size(); ++ch) {
-        const int q = channel_to_quarter(ch, state.spike_counts.size());
-        if (q >= 0 && q < 4) {
-            quarter_counts[static_cast<std::size_t>(q)] += state.spike_counts[ch];
-        }
+    if (state.accepted_stream_frames < state.pause_until_sample) {
+        WindowSample sample;
+        sample.phase = state.phase;
+        sample.frame_start = frame_start;
+        sample.frame_end = frame_end;
+        sample.elapsed_ms = elapsed_ms_from_phase_start(
+            state.phase_start_frame, frame_end, state.runtime.sample_rate_hz);
+        sample.ball_x = state.pong_game.getBallX();
+        sample.ball_y = state.pong_game.getBallY();
+        sample.ball_vx = state.pong_game.getBallSpeedX();
+        sample.ball_vy = state.pong_game.getBallSpeedY();
+        sample.paddle_y = state.pong_game.getPaddle1Y();
+        sample.raw_up = motor.raw_up;
+        sample.raw_down = motor.raw_down;
+        sample.corrected_up = motor.corrected_up;
+        sample.corrected_down = motor.corrected_down;
+        sample.up_gain = motor.up_gain;
+        sample.down_gain = motor.down_gain;
+        sample.sensory_pos = state.last_sensory_pos;
+        sample.sensory_hz = state.last_sensory_hz;
+        sample.rally_id = state.rally_id;
+        state.logger.logWindow(sample);
+        update_window(state);
+        reset_window(state);
+        return;
     }
 
-    const uint64_t sum_up = quarter_counts[0] + quarter_counts[2];   // Q0+Q2
-    const uint64_t sum_down = quarter_counts[1] + quarter_counts[3]; // Q1+Q3
+    const GameEvent event = state.pong_game.update(static_cast<int>(motor.corrected_up),
+                                                   static_cast<int>(motor.corrected_down));
 
-    GameEvent event = state.pong_game.update(static_cast<int>(sum_up), static_cast<int>(sum_down));
-    if (event == GameEvent::None) {
-        if (state.pong_game.getCondition() != ExperimentCondition::Rest) {
-            const float ball_x = static_cast<float>(state.pong_game.getBallX());
-            const float ball_y = static_cast<float>(state.pong_game.getBallY());
-            const float norm_x = std::clamp(ball_x / kGameWidth, 0.0f, 1.0f);
-            const float norm_y = std::clamp(ball_y / kGameHeight, 0.0f, 1.0f);
-
-            int pos_idx = static_cast<int>(norm_y * 7.99f);
-            int freq_idx = static_cast<int>((1.0f - norm_x) * 9.99f);
-            pos_idx = std::clamp(pos_idx, 0, static_cast<int>(kStimPositions.size() - 1));
-            freq_idx = std::clamp(freq_idx, 0, static_cast<int>(kStimFrequencies.size() - 1));
-
-            const std::size_t pos_index = static_cast<std::size_t>(pos_idx);
-            const std::size_t freq_index = static_cast<std::size_t>(freq_idx);
-            std::string seq_name = std::string(kStimPositions[pos_index]) + "_" +
-                                   std::to_string(kStimFrequencies[freq_index]) + "hz";
-            maxlab::verifyStatus(maxlab::sendSequence(seq_name.c_str()));
-        }
-    } else if (event == GameEvent::BallHitPlayerPaddle) {
-        if (state.blanking == 0) {
-            maxlab::verifyStatus(maxlab::sendSequence(kSequenceOnHit));
-            state.blanking = state.blanking_frames_after_trigger;
-            std::cout << "[DEBUG] BallHitPlayerPaddle - bounces=" << state.pong_game.getBounces() << std::endl;
-            std::cout.flush();
-        }
-    } else if (event == GameEvent::PlayerMissed) {
-        if (state.blanking == 0) {
-            maxlab::verifyStatus(maxlab::sendSequence(kSequenceOnMiss));
-            state.blanking = state.blanking_frames_after_trigger;
-            std::cout << "[DEBUG] PlayerMissed - bounces=" << state.pong_game.getBounces() << std::endl;
-            std::cout.flush();
-        }
+    switch (event) {
+        case GameEvent::None:
+            break;
+        case GameEvent::BallHitPlayerPaddle:
+            handle_hit(state);
+            break;
+        case GameEvent::PlayerMissed:
+            handle_miss(state);
+            break;
     }
 
-    if (state.window != nullptr) {
-        state.window->setState(
-            state.pong_game.getPaddle1Y(),
-            state.pong_game.getBallX(),
-            state.pong_game.getBallY(),
-            state.pong_game.getPaddleHeight());
-    }
-
-    reset_window(state, now);
+    update_window(state);
+    WindowSample sample;
+    sample.phase = state.phase;
+    sample.frame_start = frame_start;
+    sample.frame_end = frame_end;
+    sample.elapsed_ms = elapsed_ms_from_phase_start(
+        state.phase_start_frame, frame_end, state.runtime.sample_rate_hz);
+    sample.ball_x = state.pong_game.getBallX();
+    sample.ball_y = state.pong_game.getBallY();
+    sample.ball_vx = state.pong_game.getBallSpeedX();
+    sample.ball_vy = state.pong_game.getBallSpeedY();
+    sample.paddle_y = state.pong_game.getPaddle1Y();
+    sample.raw_up = motor.raw_up;
+    sample.raw_down = motor.raw_down;
+    sample.corrected_up = motor.corrected_up;
+    sample.corrected_down = motor.corrected_down;
+    sample.up_gain = motor.up_gain;
+    sample.down_gain = motor.down_gain;
+    sample.sensory_pos = state.last_sensory_pos;
+    sample.sensory_hz = state.last_sensory_hz;
+    sample.rally_id = state.rally_id;
+    state.logger.logWindow(sample);
+    reset_window(state);
 }
 
-struct FrameSamplesView {
-    const float* samples = nullptr;
-    std::size_t channel_count = 0;
-};
+static void handle_baseline_window(AppState& state) {
+    const uint64_t frame_start = state.window_start_frame;
+    const uint64_t frame_end = state.accepted_stream_frames;
+    if (state.accepted_frames_in_window > 0) {
+        state.detector.getCounts(&state.spike_counts);
+        state.motor_decoder.observeBaselineWindow(state.spike_counts);
+        const MotorActivity motor = state.motor_decoder.decodeWindow(state.spike_counts);
+        WindowSample sample;
+        sample.phase = state.phase;
+        sample.frame_start = frame_start;
+        sample.frame_end = frame_end;
+        sample.elapsed_ms = elapsed_ms_from_phase_start(
+            state.phase_start_frame, frame_end, state.runtime.sample_rate_hz);
+        sample.ball_x = state.pong_game.getBallX();
+        sample.ball_y = state.pong_game.getBallY();
+        sample.ball_vx = state.pong_game.getBallSpeedX();
+        sample.ball_vy = state.pong_game.getBallSpeedY();
+        sample.paddle_y = state.pong_game.getPaddle1Y();
+        sample.raw_up = motor.raw_up;
+        sample.raw_down = motor.raw_down;
+        sample.corrected_up = motor.corrected_up;
+        sample.corrected_down = motor.corrected_down;
+        sample.up_gain = motor.up_gain;
+        sample.down_gain = motor.down_gain;
+        sample.sensory_pos = -1;
+        sample.sensory_hz = 0;
+        sample.rally_id = state.rally_id;
+        state.logger.logWindow(sample);
+    }
+    reset_window(state);
+}
 
-static bool extract_frame_samples(const maxlab::FilteredFrameData& frame_data,
-                                  FrameSamplesView* out) {
-#ifdef MAXONE_USE_RAW_SAMPLES
-    // TODO: Wire the raw/filtered sample pointer and channel count from maxlab headers.
-    out->samples = frame_data.analogSamples;
-    out->channel_count = frame_data.frameInfo.channelCount;
-    return (out->samples != nullptr && out->channel_count > 0);
-#else
-    (void)frame_data;
-    (void)out;
-    return false;
-#endif
+static void open_stream(StreamMode mode) {
+    if (mode == StreamMode::Raw) {
+        maxlab::verifyStatus(maxlab::DataStreamerRaw_open());
+    } else {
+        maxlab::verifyStatus(maxlab::DataStreamerFiltered_open(maxlab::FilterType::IIR));
+    }
+}
+
+static maxlab::Status close_stream(StreamMode mode) {
+    return mode == StreamMode::Raw ? maxlab::DataStreamerRaw_close()
+                                   : maxlab::DataStreamerFiltered_close();
+}
+
+static void log_close_failure(maxlab::Status status) {
+    if (status != maxlab::Status::MAXLAB_OK) {
+        std::cerr << "[STREAM] close failed with status "
+                  << static_cast<int>(status) << std::endl;
+    }
+}
+
+static void throw_on_receive_error(maxlab::Status status, StreamMode mode) {
+    if (status == maxlab::Status::MAXLAB_OK || status == maxlab::Status::MAXLAB_NO_FRAME) {
+        return;
+    }
+
+    throw std::runtime_error(std::string("DataStreamer ") +
+                             stream_mode_to_string(mode) +
+                             " receive failed with status " +
+                             std::to_string(static_cast<int>(status)));
+}
+
+static bool receive_and_process_frame(AppState& state, const RunConfig& config) {
+    if (config.runtime.stream_mode == StreamMode::Raw) {
+        maxlab::RawFrameData frame_data;
+        const maxlab::Status status = maxlab::DataStreamerRaw_receiveNextFrame(&frame_data);
+        throw_on_receive_error(status, config.runtime.stream_mode);
+        if (status == maxlab::Status::MAXLAB_NO_FRAME) {
+            state.logger.noteDroppedFrame();
+            return false;
+        }
+        ++state.total_frames_seen;
+        if (frame_data.frameInfo.corrupted ||
+            frame_data.frameInfo.well_id != config.target_well) {
+            if (frame_data.frameInfo.corrupted) {
+                state.logger.noteCorruptedFrame();
+            }
+            return false;
+        }
+        ++state.accepted_frames_in_window;
+        ++state.accepted_stream_frames;
+        if (state.artifact_blanking_samples > 0) {
+            --state.artifact_blanking_samples;
+            return true;
+        }
+        state.detector.processFrame(frame_data.amplitudes, maxlab::RawFrameData::amplitudeCount);
+        return true;
+    }
+
+    maxlab::FilteredFrameData frame_data;
+    const maxlab::Status status = maxlab::DataStreamerFiltered_receiveNextFrame(&frame_data);
+    throw_on_receive_error(status, config.runtime.stream_mode);
+    if (status == maxlab::Status::MAXLAB_NO_FRAME) {
+        state.logger.noteDroppedFrame();
+        return false;
+    }
+    ++state.total_frames_seen;
+    if (frame_data.frameInfo.corrupted ||
+        frame_data.frameInfo.well_id != config.target_well) {
+        if (frame_data.frameInfo.corrupted) {
+            state.logger.noteCorruptedFrame();
+        }
+        return false;
+    }
+    ++state.accepted_frames_in_window;
+    ++state.accepted_stream_frames;
+    if (state.artifact_blanking_samples > 0) {
+        --state.artifact_blanking_samples;
+        return true;
+    }
+    for (uint64_t i = 0; i < frame_data.spikeCount; ++i) {
+        const maxlab::SpikeEvent& spike = frame_data.spikeEvents[i];
+        state.detector.addSpikeEvent(spike.channel);
+    }
+    return true;
+}
+
+static void log_runtime_config(const RunConfig& config) {
+    const RuntimeConfig& runtime = config.runtime;
+    std::cout << "[INFO] maxone_with_filter start"
+              << " config_path=" << config.config_path
+              << " target_well=" << static_cast<int>(config.target_well)
+              << " show_gui=" << (config.show_gui ? 1 : 0)
+              << " wait_for_sync=" << (config.wait_for_sync ? 1 : 0)
+              << " condition=" << condition_to_string(runtime.condition)
+              << " stream_mode=" << stream_mode_to_string(runtime.stream_mode)
+              << " window_ms=" << runtime.window_ms
+              << " pre_rest_seconds=" << runtime.pre_rest_seconds
+              << " game_seconds=" << runtime.game_seconds
+              << " sample_rate_hz=" << runtime.sample_rate_hz
+              << " artifact_blanking_samples=" << runtime.artifact_blanking_samples
+              << " miss_feedback_duration_ms=" << runtime.miss_feedback_duration_ms
+              << " miss_pause_ms=" << runtime.miss_pause_ms
+              << " hit_sensory_suppression_ms=" << runtime.hit_sensory_suppression_ms
+              << " motor_gain_target_hz=" << runtime.motor_gain_target_hz
+              << " channel_count=" << config.channel_count << std::endl;
+    std::cout << "[INFO] channels"
+              << " motor_up=" << runtime.motor_up_channels.size()
+              << " motor_down=" << runtime.motor_down_channels.size()
+              << " stim=" << runtime.stim_channels.size()
+              << " positions=" << runtime.positions.size()
+              << " frequencies=" << runtime.frequencies.size()
+              << " miss_feedback=" << runtime.miss_feedback_sequences.size()
+              << std::endl;
 }
 
 static int run_game_loop(const RunConfig& config, GameWindow* window) {
+    bool stream_open = false;
     try {
         maxlab::checkVersions();
-
-        // 同步点：等待Python发送启动信号
-        // 在打开数据流之前等待，确保MaxLab已配置完成
-        wait_for_start_signal(config.wait_for_sync);
-
-        maxlab::verifyStatus(maxlab::DataStreamerFiltered_open(maxlab::FilterType::IIR));
+        open_stream(config.runtime.stream_mode);
+        stream_open = true;
+        std::cout << "[STREAM] Opened " << stream_mode_to_string(config.runtime.stream_mode)
+                  << " stream; waiting 2 seconds for stabilization" << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(2));
 
         AppState state(config, window);
+        bool started = !config.wait_for_sync;
+        state.logger.logEvent("phase_start", state.accepted_stream_frames, state.phase, "pre_rest");
 
-        while (g_running.load()) {
-            maxlab::FilteredFrameData frame_data;
-            const maxlab::Status status = maxlab::DataStreamerFiltered_receiveNextFrame(&frame_data);
+        if (started) {
+            std::cout << "[SYNC] Sync disabled, starting immediately" << std::endl;
+        } else {
+            std::cout << "[SYNC] Waiting for start signal while collecting baseline" << std::endl;
+        }
 
-            if (status == maxlab::Status::MAXLAB_NO_FRAME) {
-                auto now = SteadyClock::now();
-                if (now - state.window_start >= state.window_len) {
-                    handle_window(state, now);
-                }
-                continue;
-            }
-
-            if (status != maxlab::Status::MAXLAB_OK) {
-                continue;
-            }
-
-            if (frame_data.frameInfo.corrupted) continue;
-            if (frame_data.frameInfo.well_id != config.target_well) continue;
-
-            if (state.blanking > 0) {
-                --state.blanking;
-                continue;
-            }
-
-            FrameSamplesView samples;
-            if (extract_frame_samples(frame_data, &samples)) {
-                state.detector.processFrame(samples.samples, samples.channel_count);
-            } else {
-                for (uint64_t i = 0; i < frame_data.spikeCount; ++i) {
-                    const maxlab::SpikeEvent& sp = frame_data.spikeEvents[i];
-                    state.detector.addSpikeEvent(sp.channel);
-                }
-            }
-
-            auto now = SteadyClock::now();
-            if (now - state.window_start >= state.window_len) {
-                handle_window(state, now);
+        while (g_running.load() && !started) {
+            started = poll_start_signal(config.wait_for_sync);
+            if (receive_and_process_frame(state, config) &&
+                state.accepted_frames_in_window >= state.samples_per_game_window) {
+                handle_baseline_window(state);
             }
         }
 
-        maxlab::verifyStatus(maxlab::DataStreamerFiltered_close());
+        state.logger.logEvent("phase_end", state.accepted_stream_frames, state.phase, "pre_rest");
+        state.phase = "game";
+        state.phase_start_frame = state.accepted_stream_frames;
+        state.logger.logEvent("phase_start", state.accepted_stream_frames, state.phase, "game");
+        state.motor_decoder.freezeGains();
+        reset_window(state);
+        std::cout << "[SYNC] Motor gains frozen; entering game loop" << std::endl;
+
+        while (g_running.load()) {
+            if (receive_and_process_frame(state, config)) {
+                if (state.accepted_frames_in_window >= state.samples_per_game_window) {
+                    handle_window(state);
+                }
+                maybe_send_sensory(state);
+            }
+        }
+
+        state.logger.logEvent("phase_end", state.accepted_stream_frames, state.phase, "game");
+        state.logger.writeSummary(state.total_frames_seen, state.accepted_stream_frames);
+        const maxlab::Status close_status = close_stream(config.runtime.stream_mode);
+        log_close_failure(close_status);
         return 0;
     } catch (const std::exception& e) {
-        (void)maxlab::DataStreamerFiltered_close();
+        if (stream_open) {
+            log_close_failure(close_stream(config.runtime.stream_mode));
+        }
         std::cerr << "Exception: " << e.what() << std::endl;
         return 1;
     }
 }
 
 static RunConfig parse_args(int argc, char* argv[]) {
-    RunConfig config;
-    if (argc >= 2) config.target_well = static_cast<uint8_t>(std::atoi(argv[1]));
-    if (argc >= 3) config.window_ms = (std::max)(1, std::atoi(argv[2]));
-    if (argc >= 4) {
-        config.blanking_frames_after_trigger =
-            static_cast<uint64_t>(std::strtoull(argv[3], nullptr, 10));
+    if (argc < 2) {
+        throw std::runtime_error(
+            "Usage: maxone_with_filter <config_path> [target_well=0] [show_gui=1] "
+            "[wait_for_sync=1]");
     }
-    if (argc >= 5) config.show_gui = (std::atoi(argv[4]) != 0);
-    if (argc >= 6) config.detector.sample_rate_hz = std::atof(argv[5]);
-    if (argc >= 7) config.detector.threshold_multiplier = static_cast<float>(std::atof(argv[6]));
-    if (argc >= 8) config.detector.min_threshold = static_cast<float>(std::atof(argv[7]));
-    if (argc >= 9) config.detector.refractory_samples = std::atoi(argv[8]);
-    if (argc >= 10) config.channel_count = static_cast<std::size_t>(std::atoi(argv[9]));
-    if (argc >= 11) config.wait_for_sync = (std::atoi(argv[10]) != 0);
+
+    RunConfig config;
+    config.config_path = argv[1];
+    config.runtime = load_runtime_config(config.config_path);
+    if (argc >= 3) {
+        config.target_well = static_cast<uint8_t>(std::atoi(argv[2]));
+    }
+    if (argc >= 4) {
+        config.show_gui = (std::atoi(argv[3]) != 0);
+    }
+    if (argc >= 5) {
+        config.wait_for_sync = (std::atoi(argv[4]) != 0);
+    }
+
+    config.channel_count = infer_channel_count(config.runtime);
+    config.detector.sample_rate_hz = config.runtime.sample_rate_hz;
+    config.detector.threshold_multiplier = static_cast<float>(config.runtime.spike_threshold_std);
+    config.detector.refractory_samples = std::max(
+        1,
+        static_cast<int>(std::lround(config.runtime.spike_refractory_period_ms *
+                                     config.runtime.sample_rate_hz / 1000.0)));
     return config;
 }
 
 int main(int argc, char* argv[]) {
-    // argv[1] = targetWell (默认 0)
-    // argv[2] = window_ms (默认 5)
-    // argv[3] = blanking_frames (默认 8000)
-    // argv[4] = show_gui (默认 1)
-    // argv[5] = sample_rate_hz (默认 20000)
-    // argv[6] = threshold_multiplier (默认 5.0)
-    // argv[7] = min_threshold (默认 -20)
-    // argv[8] = refractory_samples (默认 1000)
-    // argv[9] = channel_count (默认 1024)
-    // argv[10] = wait_for_sync (默认 1)
-    const RunConfig config = parse_args(argc, argv);
-
-    std::signal(SIGINT, on_sigint);
-
-    std::cout << "[INFO] maxone_with_filter 启动: target_well="
-              << static_cast<int>(config.target_well) << " window_ms=" << config.window_ms
-              << " blanking_frames=" << config.blanking_frames_after_trigger
-              << " show_gui=" << (config.show_gui ? 1 : 0)
-              << " sample_rate_hz=" << config.detector.sample_rate_hz
-              << " threshold_multiplier=" << config.detector.threshold_multiplier
-              << " min_threshold=" << config.detector.min_threshold
-              << " refractory_samples=" << config.detector.refractory_samples
-              << " channel_count=" << config.channel_count;
-#ifdef MAXONE_USE_RAW_SAMPLES
-    std::cout << " sample_mode=raw";
-#else
-    std::cout << " sample_mode=spike_events";
-#endif
-    std::cout << std::endl;
+    try {
+        const RunConfig config = parse_args(argc, argv);
+        std::signal(SIGINT, on_sigint);
+        log_runtime_config(config);
 
 #ifdef USE_QT
-    if (config.show_gui) {
-        QApplication app(argc, argv);
-        GameWindow window;
-        window.show();
+        if (config.show_gui) {
+            QApplication app(argc, argv);
+            GameWindow window;
+            window.show();
+            std::atomic<int> worker_rc{0};
 
-        std::thread worker([&]() {
-            run_game_loop(config, &window);
-            QMetaObject::invokeMethod(&app, "quit", Qt::QueuedConnection);
-        });
+            std::thread worker([&]() {
+                worker_rc = run_game_loop(config, &window);
+                QMetaObject::invokeMethod(&app, "quit", Qt::QueuedConnection);
+            });
 
-        const int rc = app.exec();
-        g_running = false;
-        if (worker.joinable()) worker.join();
-        return rc;
-    }
+            const int rc = app.exec();
+            g_running = false;
+            if (worker.joinable()) worker.join();
+            if (worker_rc.load() != 0) {
+                return worker_rc.load();
+            }
+            return rc;
+        }
 #else
-    if (config.show_gui) {
-        std::cerr << "Qt UI is disabled (build without USE_QT); running headless." << std::endl;
-    }
+        if (config.show_gui) {
+            std::cerr << "Qt UI is disabled (build without USE_QT); running headless."
+                      << std::endl;
+        }
 #endif
 
-    return run_game_loop(config, nullptr);
+        return run_game_loop(config, nullptr);
+    } catch (const std::exception& e) {
+        std::cerr << "Startup failed: " << e.what() << std::endl;
+        return 1;
+    }
 }

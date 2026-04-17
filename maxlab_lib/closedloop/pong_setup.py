@@ -26,93 +26,39 @@ from typing import List, Dict, Tuple, Optional
 from datetime import datetime
 from h5py import File
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from layout_config import (
+    ENTROPY_CLUSTER_COUNT,
+    ENTROPY_CLUSTER_SIZE,
+    ELECTRODE_COLUMNS,
+    MOTOR_DOWN_LEFT_ELECTRODES,
+    MOTOR_DOWN_RECORDING_ELECTRODES,
+    MOTOR_DOWN_RECTS,
+    MOTOR_DOWN_RIGHT_ELECTRODES,
+    MOTOR_UP_LEFT_ELECTRODES,
+    MOTOR_UP_RECORDING_ELECTRODES,
+    MOTOR_UP_RECTS,
+    MOTOR_UP_RIGHT_ELECTRODES,
+    RECORDING_ELECTRODES,
+    SENSORY_RECORDING_ELECTRODES,
+    SENSORY_STIM_COORDS,
+    SENSORY_STIM_ELECTRODES,
+    build_electrode_metadata,
+    coord_to_electrode,
+    sample_rect_1_in_4,
+)
+from runtime_args import generate_cpp_args, normalize_condition
+
 # ============================================================================
 # ELECTRODE LAYOUT DEFINITION
 # ============================================================================
 
-# Recording electrodes pool (reusing from stimulate.py example)
-# fmt: off
-STIM_ELECTRODES = [
-    3344, 3388, 3432, 3476, 6644, 6688, 6732, 6776,     
-]
-# fmt: on
-
-# ============================================================================
-# STIMULATION POSITION CONFIGURATION (8 positions)
-# ============================================================================
-
-# 8 distinct stimulation positions corresponding to 8 ball vertical positions
-SENSORY_STIM_ELECTRODES = [
-    STIM_ELECTRODES[0],  # Position 0 (top)
-    STIM_ELECTRODES[1],  # Position 1
-    STIM_ELECTRODES[2],  # Position 2
-    STIM_ELECTRODES[3],  # Position 3 (middle)
-    STIM_ELECTRODES[4],  # Position 4
-    STIM_ELECTRODES[5],  # Position 5
-    STIM_ELECTRODES[6],  # Position 6
-    STIM_ELECTRODES[7],  # Position 7 (bottom)
-]
-
-"""
-Generate electrode configuration with vertical expansion
-"""
-
-def generate_vertical_electrodes(base_electrode, num_rows=10, row_offset=220):
-    """Generate vertical array of electrodes"""
-    return [base_electrode + i * row_offset for i in range(num_rows)]
-
-def generate_electrode_pool():
-    """Generate full electrode pool with vertical expansion"""
-    
-    # Generate base electrode ranges
-    base = 13200
-    range1_base = list(range(base + 15, base + 55, 2))   # 13210 to 13230
-    range2_base = list(range(base + 56, base + 95, 2))   # 13230 to 13250
-    range3_base = list(range(base + 125, base + 165, 2))   # 13270 to 13290
-    range4_base = list(range(base + 166, base + 205, 2))  # 13290 to 13310
-    
-    # Combine and remove duplicates
-    all_base = range1_base + range2_base + range3_base + range4_base
-    unique_base = list(dict.fromkeys(all_base))  # 42 unique base electrodes
-    
-    # Expand each base into 10 vertical rows
-    recording_electrodes = []
-    for base_electrode in unique_base:
-        vertical_array = generate_vertical_electrodes(base_electrode, num_rows=10, row_offset=220)
-        recording_electrodes.extend(vertical_array)
-    
-    return recording_electrodes, unique_base
-
-def print_electrode_array(electrodes, name="RECORDING_ELECTRODES"):
-    """Print electrode array in formatted Python code"""
-    print(f"\n# fmt: off")
-    print(f"{name} = [")
-    
-    # Print in groups of 10 (each vertical column)
-    for i in range(0, len(electrodes), 10):
-        chunk = electrodes[i:i+10]
-        base = chunk[0]
-        print(f"    # Base {base} (10 rows)")
-        print(f"    {', '.join(map(str, chunk))},")
-        if i < len(electrodes) - 10:
-            print()
-    
-    print(f"]")
-    print(f"# fmt: on")
-    print(f"\n# Total: {len(electrodes)} electrodes")
-
-# Generate electrodes (silent)
-RECORDING_ELECTRODES, base_electrodes = generate_electrode_pool()
-
-# Validate
-assert len(RECORDING_ELECTRODES) == 800, "Should have 800 electrodes"
-assert len(set(RECORDING_ELECTRODES)) == 800, "All electrodes should be unique"
-
-# Generate functional groups
-MOTOR_1_UP_RECORDING_ELECTRODES = RECORDING_ELECTRODES[0:200]      # 20 base × 10
-MOTOR_1_DOWN_RECORDING_ELECTRODES = RECORDING_ELECTRODES[200:400]  # 20 base × 10
-MOTOR_2_UP_RECORDING_ELECTRODES = RECORDING_ELECTRODES[400:600]    # 20 base × 10
-MOTOR_2_DOWN_RECORDING_ELECTRODES = RECORDING_ELECTRODES[600:800]  # 20 base × 10
+STIM_ELECTRODES = SENSORY_STIM_ELECTRODES
+MOTOR_1_UP_RECORDING_ELECTRODES = MOTOR_UP_LEFT_ELECTRODES
+MOTOR_1_DOWN_RECORDING_ELECTRODES = MOTOR_DOWN_LEFT_ELECTRODES
+MOTOR_2_UP_RECORDING_ELECTRODES = MOTOR_UP_RIGHT_ELECTRODES
+MOTOR_2_DOWN_RECORDING_ELECTRODES = MOTOR_DOWN_RIGHT_ELECTRODES
 
 # Position names for semantic mapping
 POSITION_NAMES = [
@@ -139,40 +85,10 @@ CPP_EXECUTABLE = os.path.join(
     "build/maxone_with_filter"
 )
 
-# C++ program arguments (will be dynamically generated based on experiment wells)
-# Format: [target_well, window_ms, blanking_frames, show_gui, sample_rate_hz, threshold, min_threshold, refractory_samples, channel_count, wait_for_sync]
-_CPP_ARGS_TEMPLATE = {
-    "window_ms": 5,
-    "blanking_frames": 8000,
-    "show_gui": 1,
-    "sample_rate_hz": 20000,
-    "threshold_multiplier": 5.0,
-    "min_threshold": -20,
-    "refractory_samples": 1000,
-    "channel_count": 1024,
-    "wait_for_sync": 1
-}
-
-def generate_cpp_args(wells: List[int]) -> List[str]:
-    """Generate C++ program arguments based on experiment configuration"""
-    target_well = wells[0] if wells else 0
-    return [
-        str(target_well),
-        str(_CPP_ARGS_TEMPLATE["window_ms"]),
-        str(_CPP_ARGS_TEMPLATE["blanking_frames"]),
-        str(_CPP_ARGS_TEMPLATE["show_gui"]),
-        str(_CPP_ARGS_TEMPLATE["sample_rate_hz"]),
-        str(_CPP_ARGS_TEMPLATE["threshold_multiplier"]),
-        str(_CPP_ARGS_TEMPLATE["min_threshold"]),
-        str(_CPP_ARGS_TEMPLATE["refractory_samples"]),
-        str(_CPP_ARGS_TEMPLATE["channel_count"]),
-        str(_CPP_ARGS_TEMPLATE["wait_for_sync"])
-    ]
-
 # Stimulation parameters
 STIM_PARAMS = {
     "ball_position": {
-        "amplitude_mV": 50,
+        "amplitude_mV": 75,
         "phase_us": 200,
         "frequencies_Hz": [4, 8, 12, 16, 20, 24, 28, 32, 36, 40],  # 10 frequencies
     },
@@ -187,11 +103,95 @@ STIM_PARAMS = {
         "phase_us": 200,
         "burst_frequency_Hz": 5,
         "burst_duration_ms": 4000,
+        "variant_count": 8,
     }
+}
+
+RUNTIME_PARAMS = {
+    "sample_rate_hz": 20000,
+    "window_ms": 10,
+    "pre_rest_seconds": 600,
+    "game_seconds": 1200,
+    "exclude_initial_game_seconds": 10,
+    "artifact_blanking_samples": 200,
+    "miss_feedback_duration_ms": STIM_PARAMS["miss_feedback"]["burst_duration_ms"],
+    "miss_pause_ms": 4000,
+    "hit_sensory_suppression_ms": 100,
+    "motor_gain_target_hz": 20.0,
+    "stream_mode": "raw",
 }
 
 event_counter = 0  # Global event counter
 STIM_NEIGHBOR_SEARCH_RADIUS = 2
+
+
+def create_session_context(
+    recording_root: str,
+    condition: str,
+    culture_id: str,
+    cell_type: str,
+    replicate_id: str,
+    experiment_day: int,
+    session_index: int,
+    operator: str = "",
+    notes: str = "",
+    timestamp: Optional[str] = None,
+    runtime_params: Optional[Dict[str, object]] = None,
+) -> Dict[str, str]:
+    """Create a session directory and write metadata needed for later analysis."""
+    runtime_params = runtime_params or RUNTIME_PARAMS
+    normalized_condition = normalize_condition(condition)
+    timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_culture = culture_id.strip().replace(" ", "_")
+    session_id = (
+        f"{safe_culture}_day{experiment_day:02d}_s{session_index:02d}_"
+        f"{normalized_condition}_{timestamp}"
+    )
+    session_dir = Path(recording_root) / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest = {
+        "session_id": session_id,
+        "metadata": {
+            "culture_id": culture_id,
+            "cell_type": cell_type,
+            "replicate_id": replicate_id,
+            "experiment_day": experiment_day,
+            "session_index": session_index,
+            "condition": normalized_condition,
+            "operator": operator,
+            "notes": notes,
+            "timestamp": timestamp,
+        },
+        "phase_durations": {
+            "pre_rest_seconds": runtime_params["pre_rest_seconds"],
+            "game_seconds": runtime_params["game_seconds"],
+        },
+        "analysis_defaults": {
+            "exclude_initial_game_seconds": runtime_params["exclude_initial_game_seconds"],
+            "t1_minutes": [0, 5],
+            "t2_minutes": [6, 20],
+        },
+        "files": {
+            "raw_h5": str(session_dir / f"{session_id}.raw.h5"),
+            "config": str(session_dir / "session_config.json"),
+            "resolved_layout": str(session_dir / "resolved_layout.json"),
+            "runtime_events": str(session_dir / "runtime_events.jsonl"),
+            "window_samples": str(session_dir / "window_samples.csv"),
+            "quality_summary": str(session_dir / "quality_summary.json"),
+        },
+    }
+
+    manifest_path = session_dir / "session_manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    return {
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "manifest_path": str(manifest_path),
+        **manifest["files"],
+    }
 
 
 # ============================================================================
@@ -284,10 +284,14 @@ class CPPProcessManager:
         start_time = time.time()
 
         while time.time() - start_time < timeout and not self.ready_event.is_set():
+            if self.process is not None and self.process.poll() is not None:
+                raise RuntimeError(
+                    f"C++ process exited before ready marker (exit code {self.process.returncode})"
+                )
             time.sleep(0.1)
 
         if not self.ready_event.is_set():
-            print(f"[C++] Warning: Did not see ready marker within {timeout}s")
+            raise RuntimeError(f"C++ ready marker not seen within {timeout}s")
 
     def send_start_signal(self):
         """向C++进程发送启动信号"""
@@ -299,6 +303,13 @@ class CPPProcessManager:
             self.process.stdin.flush()
         except Exception as e:
             raise RuntimeError(f"Failed to send start signal: {e}")
+
+    def raise_if_exited(self, context: str = "experiment"):
+        """Raise if the C++ process has exited before Python requested shutdown."""
+        if self.process is not None and self.process.poll() is not None:
+            raise RuntimeError(
+                f"C++ process exited during {context} (exit code {self.process.returncode})"
+            )
 
     def stop(self):
         """停止C++进程"""
@@ -600,42 +611,91 @@ def create_biphasic_pulse(
     return seq
 
 
-def create_unit_configuration_commands(
+def create_single_unit_configuration_commands(
     target_unit_id: int,
     all_unit_ids: List[int]
 ) -> List:
-    """Generate commands to activate only the target stimulation unit
-    
-    This ensures the sequence only stimulates at the desired position.
-    
-    Parameters
-    ----------
-    target_unit_id : int
-        The stimulation unit to activate
-    all_unit_ids : List[int]
-        All available stimulation unit IDs
-        
-    Returns
-    -------
-    List
-        List of mx.StimulationUnit configuration commands
-    """
-    commands = []
-    
-    # Disconnect all units first
-    for unit_id in all_unit_ids:
-        commands.append(
-            mx.StimulationUnit(unit_id).connect(False)
+    return [
+        mx.StimulationUnit(unit_id).connect(False)
+        for unit_id in all_unit_ids
+    ] + [
+        mx.StimulationUnit(target_unit_id).connect(True).power_up(True)
+    ]
+
+
+def create_all_unit_configuration_commands(all_unit_ids: List[int]) -> List:
+    return [
+        mx.StimulationUnit(unit_id).connect(True).power_up(True)
+        for unit_id in all_unit_ids
+    ]
+
+
+def _append_clamped_miss_interval(
+    seq: mx.Sequence,
+    delay_samples: int,
+    elapsed_samples: int,
+    total_samples: int,
+    future_pulse_samples: int,
+) -> int:
+    """Append a miss interval without exceeding the total burst duration."""
+    max_allowed = max(0, total_samples - elapsed_samples - future_pulse_samples)
+    clamped_delay = min(max(0, delay_samples), max_allowed)
+    if clamped_delay > 0:
+        seq.append(mx.DelaySamples(clamped_delay))
+    return clamped_delay
+
+
+def _prepare_single_miss_feedback_sequence(
+    seq_name: str,
+    electrode_to_unit: Dict[int, int],
+    stim_electrodes: List[int],
+    rng: np.random.Generator,
+    all_unit_ids: List[int],
+) -> mx.Sequence:
+    params = STIM_PARAMS["miss_feedback"]
+    seq = mx.Sequence(name=seq_name, persistent=True)
+
+    burst_duration_ms = params["burst_duration_ms"]
+    base_frequency_Hz = params["burst_frequency_Hz"]
+    num_pulses = int((burst_duration_ms / 1000.0) * base_frequency_Hz)
+    base_interval = int(RUNTIME_PARAMS["sample_rate_hz"] / base_frequency_Hz)
+    total_samples = int(RUNTIME_PARAMS["sample_rate_hz"] * (burst_duration_ms / 1000.0))
+    phase_samples = int(params["phase_us"] / 50)
+    pulse_samples = 2 * phase_samples
+    elapsed_samples = 0
+
+    for pulse_idx in range(num_pulses):
+        target_electrode = stim_electrodes[int(rng.integers(0, len(stim_electrodes)))]
+        target_unit = electrode_to_unit[target_electrode]
+
+        for cmd in create_single_unit_configuration_commands(target_unit, all_unit_ids):
+            seq.append(cmd)
+
+        create_biphasic_pulse(
+            seq,
+            amplitude_mV=params["amplitude_mV"],
+            phase_us=params["phase_us"],
+            event_label=f"{seq_name}_pulse_{pulse_idx+1}"
         )
-    
-    # Connect and activate only the target unit
-    commands.append(
-        mx.StimulationUnit(target_unit_id)
-        .connect(True)
-        .power_up(True)
-    )
-    
-    return commands
+        elapsed_samples += pulse_samples
+
+        if pulse_idx < num_pulses - 1:
+            jitter = int(base_interval * rng.uniform(-0.5, 0.5))
+            delay_samples = base_interval + jitter
+            future_pulse_samples = (num_pulses - pulse_idx - 1) * pulse_samples
+            elapsed_samples += _append_clamped_miss_interval(
+                seq,
+                delay_samples=delay_samples,
+                elapsed_samples=elapsed_samples,
+                total_samples=total_samples,
+                future_pulse_samples=future_pulse_samples,
+            )
+
+    if elapsed_samples < total_samples:
+        seq.append(mx.DelaySamples(total_samples - elapsed_samples))
+
+    seq.send()
+    return seq
 
 
 def prepare_decoupled_ball_sequences(
@@ -647,7 +707,10 @@ def prepare_decoupled_ball_sequences(
 
     Each sequence contains:
     1. Unit configuration (activate target position, deactivate others)
-    2. Stimulation pulses at specified frequency
+    2. One short biphasic stimulation pulse.
+
+    The frequency remains in the sequence name for C++ lookup; C++ schedules
+    when each short sequence is triggered.
 
     Parameters
     ----------
@@ -678,7 +741,7 @@ def prepare_decoupled_ball_sequences(
             seq_name = f"{position_name}_{freq_hz}hz"
             seq = mx.Sequence(name=seq_name, persistent=True)
 
-            unit_config_commands = create_unit_configuration_commands(
+            unit_config_commands = create_single_unit_configuration_commands(
                 target_unit_id=target_unit,
                 all_unit_ids=all_unit_ids
             )
@@ -686,21 +749,12 @@ def prepare_decoupled_ball_sequences(
             for cmd in unit_config_commands:
                 seq.append(cmd)
 
-            seq.append(mx.DelaySamples(100))
-
-            num_pulses = freq_hz
-            interval_samples = int(20000 / freq_hz)
-
-            for pulse_idx in range(num_pulses):
-                create_biphasic_pulse(
-                    seq,
-                    amplitude_mV=params["amplitude_mV"],
-                    phase_us=params["phase_us"],
-                    event_label=f"{seq_name}_pulse_{pulse_idx+1}"
-                )
-
-                if pulse_idx < num_pulses - 1:
-                    seq.append(mx.DelaySamples(interval_samples))
+            create_biphasic_pulse(
+                seq,
+                amplitude_mV=params["amplitude_mV"],
+                phase_us=params["phase_us"],
+                event_label=f"{seq_name}_pulse"
+            )
 
             seq.send()
             sequences[seq_name] = seq
@@ -708,15 +762,20 @@ def prepare_decoupled_ball_sequences(
     return sequences
 
 
-def prepare_hit_feedback_sequence() -> mx.Sequence:
+def prepare_hit_feedback_sequence(all_unit_ids: List[int]) -> mx.Sequence:
     """Prepare burst sequence for successful paddle hit"""
     seq = mx.Sequence(name="hit_feedback", persistent=True)
     params = STIM_PARAMS["hit_feedback"]
 
+    for cmd in create_all_unit_configuration_commands(all_unit_ids):
+        seq.append(cmd)
+
+    seq.append(mx.DelaySamples(100))
+
     burst_duration_ms = params["burst_duration_ms"]
     frequency_Hz = params["burst_frequency_Hz"]
     num_pulses = int((burst_duration_ms / 1000.0) * frequency_Hz)
-    interval_samples = int(20000 / frequency_Hz)
+    interval_samples = int(RUNTIME_PARAMS["sample_rate_hz"] / frequency_Hz)
 
     for i in range(num_pulses):
         create_biphasic_pulse(
@@ -725,39 +784,42 @@ def prepare_hit_feedback_sequence() -> mx.Sequence:
             phase_us=params["phase_us"],
             event_label=f"hit_feedback_pulse_{i+1}"
         )
-        seq.append(mx.DelaySamples(interval_samples))
+        if i < num_pulses - 1:
+            seq.append(mx.DelaySamples(interval_samples))
 
     seq.send()
     return seq
 
 
-def prepare_miss_feedback_sequence() -> mx.Sequence:
-    """Prepare unpredictable sequence for missed ball"""
-    seq = mx.Sequence(name="miss_feedback", persistent=True)
+def prepare_miss_feedback_sequences(
+    electrode_to_unit: Dict[int, int],
+    stim_electrodes: List[int],
+) -> Dict[str, mx.Sequence]:
+    """Prepare unpredictable sequences for missed balls"""
     params = STIM_PARAMS["miss_feedback"]
+    sequences = {}
+    all_unit_ids = list(electrode_to_unit.values())
+    rng = np.random.default_rng(42)
 
-    burst_duration_ms = params["burst_duration_ms"]
-    base_frequency_Hz = params["burst_frequency_Hz"]
-    num_pulses = int((burst_duration_ms / 1000.0) * base_frequency_Hz)
+    sequences["miss_feedback"] = _prepare_single_miss_feedback_sequence(
+        "miss_feedback",
+        electrode_to_unit,
+        stim_electrodes,
+        rng,
+        all_unit_ids,
+    )
 
-    np.random.seed(42)
-
-    for i in range(num_pulses):
-        amplitude = params["amplitude_mV"] * np.random.uniform(0.8, 1.2)
-
-        create_biphasic_pulse(
-            seq,
-            amplitude_mV=amplitude,
-            phase_us=params["phase_us"],
-            event_label=f"miss_feedback_pulse_{i+1}"
+    for variant_idx in range(params["variant_count"]):
+        seq_name = f"miss_feedback_{variant_idx}"
+        sequences[seq_name] = _prepare_single_miss_feedback_sequence(
+            seq_name,
+            electrode_to_unit,
+            stim_electrodes,
+            rng,
+            all_unit_ids,
         )
 
-        base_interval = int(20000 / base_frequency_Hz)
-        jitter = int(base_interval * np.random.uniform(0.5, 1.5))
-        seq.append(mx.DelaySamples(base_interval + jitter))
-
-    seq.send()
-    return seq
+    return sequences
 
 
 def prepare_all_sequences(
@@ -791,14 +853,17 @@ def prepare_all_sequences(
         electrode_to_unit, stim_electrodes, position_names
     )
 
-    hit_sequence = prepare_hit_feedback_sequence()
-    miss_sequence = prepare_miss_feedback_sequence()
+    all_unit_ids = list(electrode_to_unit.values())
+    hit_sequence = prepare_hit_feedback_sequence(all_unit_ids)
+    miss_sequences = prepare_miss_feedback_sequences(electrode_to_unit, stim_electrodes)
 
     sequences = ball_sequences.copy()
     sequences["hit_feedback"] = hit_sequence
-    sequences["miss_feedback"] = miss_sequence
+    sequences.update(miss_sequences)
 
-    print_success(f"Prepared {len(sequences)} sequences ({ball_sequence_count} ball + 2 feedback)")
+    print_success(
+        f"Prepared {len(sequences)} sequences ({ball_sequence_count} ball + {1 + STIM_PARAMS['miss_feedback']['variant_count']} feedback variants)"
+    )
 
     return sequences
 
@@ -807,24 +872,72 @@ def prepare_all_sequences(
 # RECORDING CONTROL
 # ============================================================================
 
+def _cleanup_saving(
+    saving: mx.Saving,
+    stop_active_recording: bool,
+    close_file: bool,
+    delete_groups: bool,
+) -> Optional[Exception]:
+    """Best-effort cleanup for MaxLab saving state; returns the first cleanup error."""
+    first_error = None
+
+    cleanup_steps = []
+    if stop_active_recording:
+        cleanup_steps.append(("stop recording", saving.stop_recording))
+    if close_file:
+        cleanup_steps.append(("stop file", saving.stop_file))
+    if delete_groups:
+        cleanup_steps.append(("delete groups", saving.group_delete_all))
+
+    for step_name, cleanup in cleanup_steps:
+        try:
+            cleanup()
+        except Exception as cleanup_error:
+            if first_error is None:
+                first_error = cleanup_error
+            print_warning(f"Saving cleanup failed during {step_name}: {cleanup_error}")
+
+    return first_error
+
+
 def start_recording(
     recording_name: str,
-    wells: List[int] = [0]
+    cpp_config: Dict,
+    wells: List[int] = [0],
+    recording_dir: str = RECORDING_DIR,
 ) -> mx.Saving:
     """Start recording data to HDF5 file"""
     print_step_header(10, "STARTING DATA RECORDING")
 
-    recording_path = Path(RECORDING_DIR) / f"{recording_name}.raw.h5"
+    recording_path = Path(recording_dir) / f"{recording_name}.raw.h5"
+    target_well = wells[0]
+    s = None
+    file_started = False
+    recording_attempted = False
 
     try:
         s = mx.Saving()
-        s.open_directory(RECORDING_DIR)
+        s.open_directory(recording_dir)
         s.start_file(recording_name)
-        s.group_define(0, "all_channels", list(range(1024)))
+        file_started = True
+        s.group_delete_all()
+        s.group_define(target_well, "all_channels", list(range(1024)))
+        s.group_define(target_well, "motor_down", cpp_config["channels"]["motor_down_channels"])
+        s.group_define(target_well, "motor_up", cpp_config["channels"]["motor_up_channels"])
+        s.group_define(target_well, "sensory", cpp_config["channels"]["sensory_channels"])
+        s.group_define(target_well, "stim_channels", cpp_config["channels"]["stim_channels"])
+        recording_attempted = True
         s.start_recording(wells)
         print_success(f"Recording: {recording_path.name}")
     except Exception as e:
         print_error(f"Recording failed: {str(e)}")
+        if s is not None:
+            _cleanup_saving(
+                s,
+                stop_active_recording=recording_attempted,
+                close_file=file_started,
+                delete_groups=file_started,
+            )
         raise
 
     return s
@@ -834,15 +947,24 @@ def stop_recording(saving: mx.Saving) -> None:
     """Stop recording and close file"""
     print_step_header(15, "STOPPING DATA RECORDING")
 
+    cleanup_error = _cleanup_saving(
+        saving,
+        stop_active_recording=True,
+        close_file=True,
+        delete_groups=True,
+    )
+
     try:
-        saving.stop_recording()
-        saving.stop_file()
-        saving.group_delete_all()
         time.sleep(mx.Timing.waitAfterRecording)
-        print_success("Recording stopped")
-    except Exception as e:
-        print_error(f"Failed to stop recording: {str(e)}")
-        raise
+    except Exception as sleep_error:
+        if cleanup_error is None:
+            cleanup_error = sleep_error
+
+    if cleanup_error is not None:
+        print_error(f"Failed to stop recording: {cleanup_error}")
+        raise cleanup_error
+
+    print_success("Recording stopped")
 
 
 # ============================================================================
@@ -851,11 +973,14 @@ def stop_recording(saving: mx.Saving) -> None:
 
 def export_cpp_config(
     array: mx.Array,
+    condition: str,
     electrode_to_unit: Dict[int, int],
     stim_electrodes: List[int],
     position_names: List[str],
     sequences: Dict[str, mx.Sequence],
-    config_path: str
+    config_path: str,
+    session_name: str,
+    runtime_params: Optional[Dict[str, object]] = None,
 ) -> Dict:
     """Export configuration for C++ closed-loop module
 
@@ -880,6 +1005,7 @@ def export_cpp_config(
         Configuration dictionary
     """
     print_step_header(11, "EXPORTING C++ CONFIGURATION")
+    runtime_params = runtime_params or RUNTIME_PARAMS
 
     try:
         config = array.get_config()
@@ -888,6 +1014,10 @@ def export_cpp_config(
         motor_1_down_channels = config.get_channels_for_electrodes(MOTOR_1_DOWN_RECORDING_ELECTRODES)
         motor_2_up_channels = config.get_channels_for_electrodes(MOTOR_2_UP_RECORDING_ELECTRODES)
         motor_2_down_channels = config.get_channels_for_electrodes(MOTOR_2_DOWN_RECORDING_ELECTRODES)
+        motor_down_channels = motor_1_down_channels + motor_2_down_channels
+        motor_up_channels = motor_1_up_channels + motor_2_up_channels
+        sensory_channels = config.get_channels_for_electrodes(SENSORY_RECORDING_ELECTRODES)
+        recording_channels = config.get_channels_for_electrodes(RECORDING_ELECTRODES)
         stim_channels = config.get_channels_for_electrodes(stim_electrodes)
 
     except Exception as e:
@@ -901,6 +1031,12 @@ def export_cpp_config(
         position_names[idx]: electrode_to_unit[electrode]
         for idx, electrode in enumerate(stim_electrodes)
     }
+    channel_lookup = {
+        electrode: channel
+        for electrode, channel in zip(RECORDING_ELECTRODES, recording_channels)
+    }
+    electrode_metadata = build_electrode_metadata(channel_lookup, electrode_to_unit)
+    resolved_layout_path = Path(config_path).with_name("resolved_layout.json")
 
     sequence_lookup = {}
     for pos_name in position_names:
@@ -918,20 +1054,43 @@ def export_cpp_config(
             "architecture": "4-channel motor control with position × frequency stimulation"
         },
 
+        "condition": condition,
+        "runtime": runtime_params,
+        "recording": {
+            "session_name": session_name,
+            "raw_h5": str(Path(config_path).with_name(f"{session_name}.raw.h5")),
+            "resolved_layout": str(resolved_layout_path),
+            "runtime_events": str(Path(config_path).with_name("runtime_events.jsonl")),
+            "window_samples": str(Path(config_path).with_name("window_samples.csv")),
+            "quality_summary": str(Path(config_path).with_name("quality_summary.json")),
+        },
+
         "electrodes": {
-            "motor_1_up_recording": MOTOR_1_UP_RECORDING_ELECTRODES,
-            "motor_1_down_recording": MOTOR_1_DOWN_RECORDING_ELECTRODES,
-            "motor_2_up_recording": MOTOR_2_UP_RECORDING_ELECTRODES,
-            "motor_2_down_recording": MOTOR_2_DOWN_RECORDING_ELECTRODES,
+            "motor_down_left_recording": MOTOR_1_DOWN_RECORDING_ELECTRODES,
+            "motor_down_right_recording": MOTOR_2_DOWN_RECORDING_ELECTRODES,
+            "motor_up_left_recording": MOTOR_1_UP_RECORDING_ELECTRODES,
+            "motor_up_right_recording": MOTOR_2_UP_RECORDING_ELECTRODES,
+            "motor_down_recording": MOTOR_DOWN_RECORDING_ELECTRODES,
+            "motor_up_recording": MOTOR_UP_RECORDING_ELECTRODES,
+            "sensory_recording": SENSORY_RECORDING_ELECTRODES,
             "sensory_stimulation": stim_electrodes
         },
 
         "channels": {
-            "motor_1_up_channels": motor_1_up_channels,
-            "motor_1_down_channels": motor_1_down_channels,
-            "motor_2_up_channels": motor_2_up_channels,
-            "motor_2_down_channels": motor_2_down_channels,
+            "motor_down_left_channels": motor_1_down_channels,
+            "motor_down_right_channels": motor_2_down_channels,
+            "motor_up_left_channels": motor_1_up_channels,
+            "motor_up_right_channels": motor_2_up_channels,
+            "motor_down_channels": motor_down_channels,
+            "motor_up_channels": motor_up_channels,
+            "sensory_channels": sensory_channels,
             "stim_channels": stim_channels
+        },
+
+        "analysis_layout": {
+            "entropy_cluster_count": ENTROPY_CLUSTER_COUNT,
+            "entropy_cluster_size": ENTROPY_CLUSTER_SIZE,
+            "electrode_metadata": electrode_metadata,
         },
 
         "stimulation_units": {
@@ -944,19 +1103,15 @@ def export_cpp_config(
 
         "sequences": {
             "ball_position": {
-                "total_sequences": len(ball_sequences),
                 "positions": position_names,
                 "frequencies": frequencies,
-                "sequence_lookup": sequence_lookup,
-                "usage_example": "pos3_20hz triggers 20Hz at position 3"
+                "sequence_lookup": sequence_lookup
             },
             "hit_feedback": {
-                "sequence_name": "hit_feedback",
-                "trigger": "on_paddle_hit"
+                "sequence_name": "hit_feedback"
             },
             "miss_feedback": {
-                "sequence_name": "miss_feedback",
-                "trigger": "on_ball_miss"
+                "sequence_names": sorted(k for k in sequences if k.startswith("miss_feedback_"))
             }
         },
 
@@ -1018,6 +1173,8 @@ def export_cpp_config(
         config_file = Path(config_path)
         with open(config_file, 'w') as f:
             json.dump(cpp_config, f, indent=2)
+        with open(resolved_layout_path, 'w') as f:
+            json.dump(cpp_config["analysis_layout"], f, indent=2)
         print_success(f"Config: {config_file.name}")
     except Exception as e:
         print_error(f"Failed to write config file: {str(e)}")
@@ -1041,19 +1198,32 @@ def analyze_recording(recording_path: str) -> None:
             events = f[f"{well_path}/events"]
 
             duration = traces.shape[1] / 20000
-            print_success(f"Duration: {duration:.2f}s, {len(events)} events")
+            runtime_events_path = Path(recording_path).with_name("runtime_events.jsonl")
+            event_types = {}
 
             if len(events) > 0:
-                event_types = {}
+                print_success(f"Duration: {duration:.2f}s, {len(events)} events")
                 for event in events:
                     event_desc = event[3].decode('utf-8') if isinstance(event[3], bytes) else str(event[3])
                     event_type = event_desc.split('_')[0] if '_' in event_desc else event_desc
                     event_types[event_type] = event_types.get(event_type, 0) + 1
-
-                for event_type, count in sorted(event_types.items()):
-                    print_info(f"  {event_type}: {count}")
+            elif runtime_events_path.exists():
+                with open(runtime_events_path) as runtime_events_file:
+                    runtime_events = [
+                        json.loads(line)
+                        for line in runtime_events_file
+                        if line.strip()
+                    ]
+                print_success(f"Duration: {duration:.2f}s, {len(runtime_events)} runtime events")
+                for event in runtime_events:
+                    event_type = event.get("event", "unknown")
+                    event_types[event_type] = event_types.get(event_type, 0) + 1
             else:
+                print_success(f"Duration: {duration:.2f}s, {len(events)} events")
                 print_warning("No events recorded")
+
+            for event_type, count in sorted(event_types.items()):
+                print_info(f"  {event_type}: {count}")
 
     except Exception as e:
         print_error(f"Analysis failed: {str(e)}")
@@ -1066,18 +1236,50 @@ def analyze_recording(recording_path: str) -> None:
 
 def run_pong_experiment(
     duration_minutes: int = 20,
-    condition: str = "STIMULUS",
-    wells: List[int] = [0]
+    condition: str = "STIM",
+    wells: List[int] = [0],
+    pre_rest_seconds: Optional[int] = None,
+    culture_id: str = "unknown_culture",
+    cell_type: str = "unknown",
+    replicate_id: str = "unknown_replicate",
+    experiment_day: int = 0,
+    session_index: int = 1,
+    operator: str = "",
+    notes: str = "",
+    recording_root: str = RECORDING_DIR,
 ) -> None:
     """Run complete Pong experiment with decoupled architecture"""
+    condition = normalize_condition(condition)
+    runtime_params = dict(RUNTIME_PARAMS)
+    runtime_params["game_seconds"] = duration_minutes * 60
+    if pre_rest_seconds is not None:
+        runtime_params["pre_rest_seconds"] = pre_rest_seconds
+    if int(runtime_params["pre_rest_seconds"]) < 0:
+        raise ValueError("pre_rest_seconds must be non-negative")
     print("\n" + "=" * 70)
     print("PONG CLOSED-LOOP EXPERIMENT (DECOUPLED ARCHITECTURE)")
     print("=" * 70)
     print(f"Condition: {condition} | Duration: {duration_minutes}min | Wells: {wells}")
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    session_name = f"pong_{condition}_{timestamp}"
-    config_path = Path(RECORDING_DIR) / f"{session_name}_config.json"
+    session_context = create_session_context(
+        recording_root=recording_root,
+        condition=condition,
+        culture_id=culture_id,
+        cell_type=cell_type,
+        replicate_id=replicate_id,
+        experiment_day=experiment_day,
+        session_index=session_index,
+        operator=operator,
+        notes=notes,
+        runtime_params=runtime_params,
+    )
+    session_name = session_context["session_id"]
+    config_path = Path(session_context["config"])
+    # Validate the single-well C++ contract before touching MaxLab hardware.
+    cpp_args = generate_cpp_args(wells, str(config_path))
+    cpp_manager = None
+    saving = None
+    recording_active = False
 
     # Step 0: Check C++ executable
     print_step_header(0, "CHECKING C++ EXECUTABLE")
@@ -1088,18 +1290,6 @@ def run_pong_experiment(
         raise RuntimeError("C++ executable not found")
     print_success("C++ executable found")
 
-    # Step 1: Start C++ game process
-    print_step_header(1, "STARTING C++ GAME PROCESS")
-    cpp_args = generate_cpp_args(wells)
-    cpp_manager = None
-    try:
-        cpp_manager = CPPProcessManager(CPP_EXECUTABLE, cpp_args)
-        cpp_manager.start()
-        print_success("C++ game process started successfully")
-    except Exception as e:
-        print_error(f"Failed to start C++ process: {e}")
-        raise RuntimeError(f"C++ process startup failed: {e}")
-
     # Step 2: Initialize system
     initialize_system()
     print_substep(f"Waiting {mx.Timing.waitInit}s for system stabilization...")
@@ -1107,12 +1297,7 @@ def run_pong_experiment(
     print_success("System ready")
     
     # Step 3: Configure array
-    all_recording = list(set(
-        MOTOR_1_UP_RECORDING_ELECTRODES +
-        MOTOR_1_DOWN_RECORDING_ELECTRODES +
-        MOTOR_2_UP_RECORDING_ELECTRODES +
-        MOTOR_2_DOWN_RECORDING_ELECTRODES 
-    ))
+    all_recording = RECORDING_ELECTRODES
     
     stim_candidates = build_stim_candidate_electrodes(SENSORY_STIM_ELECTRODES)
     array = configure_array(
@@ -1184,75 +1369,101 @@ def run_pong_experiment(
     # Step 11: Export configuration for C++
     cpp_config = export_cpp_config(
         array,
+        condition,
         electrode_to_unit,
         resolved_stim_electrodes,
         POSITION_NAMES,
         sequences,
         str(config_path),
+        session_name,
+        runtime_params=runtime_params,
     )
 
     # Step 12: Start recording
-    saving = start_recording(session_name, wells)
+    saving = start_recording(session_name, cpp_config, wells, recording_dir=session_context["session_dir"])
+    recording_active = True
 
-    # Step 13: Baseline recording
-    print_step_header(13, "BASELINE RECORDING")
-    baseline_duration = 30
-    print_substep(f"Recording {baseline_duration}s baseline...")
-    for i in range(baseline_duration):
-        if (i + 1) % 10 == 0:
-            print_info(f"{baseline_duration - i}s remaining")
-        time.sleep(1)
-    print_success("Baseline complete")
-    
-    # Step 14: C++ module integration
-    print_step_header(14, "C++ MODULE INTEGRATION")
-    print_substep("Sending start signal to C++ game...")
     try:
-        cpp_manager.send_start_signal()
-        print_success("C++ game loop started")
-    except Exception as e:
-        print_error(f"Failed to send start signal: {e}")
-        print_error("Aborting experiment due to sync failure")
-        raise RuntimeError(f"C++ sync failed: {e}")
+        # Step 12b: Start C++ game process after MaxLab setup and config export.
+        print_step_header(12, "STARTING C++ GAME PROCESS")
+        try:
+            cpp_manager = CPPProcessManager(CPP_EXECUTABLE, cpp_args)
+            cpp_manager.start()
+            print_success("C++ game process started successfully")
+        except Exception as e:
+            print_error(f"Failed to start C++ process: {e}")
+            raise RuntimeError(f"C++ process startup failed: {e}")
 
-    time.sleep(2)
+        # Step 13: Baseline recording
+        print_step_header(13, "BASELINE RECORDING")
+        baseline_duration = int(runtime_params["pre_rest_seconds"])
+        if baseline_duration == 0:
+            print_substep("Skipping baseline recording (pre_rest_seconds=0)")
+        else:
+            print_substep(f"Recording {baseline_duration}s baseline...")
+        for i in range(baseline_duration):
+            cpp_manager.raise_if_exited("baseline recording")
+            if (i + 1) % 10 == 0:
+                print_info(f"{baseline_duration - i}s remaining")
+            time.sleep(1)
+        print_success("Baseline complete")
 
-    print_substep(f"Running experiment for {duration_minutes} minutes...")
-    total_seconds = duration_minutes * 60
-    last_update = 0
+        # Step 14: C++ module integration
+        print_step_header(14, "C++ MODULE INTEGRATION")
+        print_substep("Sending start signal to C++ game...")
+        try:
+            cpp_manager.send_start_signal()
+            print_success("C++ game loop started")
+        except Exception as e:
+            print_error(f"Failed to send start signal: {e}")
+            print_error("Aborting experiment due to sync failure")
+            raise RuntimeError(f"C++ sync failed: {e}")
 
-    for i in range(total_seconds):
-        if cpp_manager.process.poll() is not None:
-            print_error("C++ process exited early")
-            print_error(f"Exit code: {cpp_manager.process.returncode}")
-            break
+        time.sleep(2)
+        cpp_manager.raise_if_exited("game startup")
 
-        current_minute = i // 60
-        if current_minute != last_update:
-            minutes_remaining = (total_seconds - i) // 60
-            print_info(f"{minutes_remaining} min remaining")
-            last_update = current_minute
-        time.sleep(1)
+        print_substep(f"Running experiment for {duration_minutes} minutes...")
+        total_seconds = duration_minutes * 60
+        last_update = 0
 
-    if cpp_manager.process.poll() is None:
+        for i in range(total_seconds):
+            cpp_manager.raise_if_exited("experiment")
+
+            current_minute = i // 60
+            if current_minute != last_update:
+                minutes_remaining = (total_seconds - i) // 60
+                print_info(f"{minutes_remaining} min remaining")
+                last_update = current_minute
+            time.sleep(1)
+
+        cpp_manager.raise_if_exited("experiment completion")
         print_success("Experiment complete")
-    else:
-        print_error("Experiment terminated early")
 
-    # Step 15: Stop recording
-    stop_recording(saving)
+        # Step 15: Stop recording
+        try:
+            stop_recording(saving)
+        finally:
+            recording_active = False
 
-    # Step 16: Analyze results
-    recording_path = Path(RECORDING_DIR) / f"{session_name}.raw.h5"
-    if recording_path.exists():
-        analyze_recording(str(recording_path))
-    else:
-        print_warning(f"Recording file not found: {recording_path}")
-
-    # Cleanup: Stop C++ process if still running
-    if 'cpp_manager' in locals() and cpp_manager is not None:
-        print("\n[INFO] Stopping C++ process...")
-        cpp_manager.stop()
+        # Step 16: Analyze results
+        recording_path = Path(session_context["raw_h5"])
+        if recording_path.exists():
+            analyze_recording(str(recording_path))
+        else:
+            print_warning(f"Recording file not found: {recording_path}")
+    finally:
+        # Cleanup: Stop C++ process if still running
+        if cpp_manager is not None:
+            print("\n[INFO] Stopping C++ process...")
+            cpp_manager.stop()
+        if recording_active and saving is not None:
+            print("\n[INFO] Stopping recording after error...")
+            try:
+                stop_recording(saving)
+            except Exception as cleanup_error:
+                print_error(f"Recording cleanup failed: {cleanup_error}")
+            finally:
+                recording_active = False
 
 
 # ============================================================================
@@ -1265,8 +1476,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --duration 20 --condition STIMULUS
-  %(prog)s --duration 30 --condition NO_STIMULUS --wells 0 1
+  %(prog)s --duration 20 --condition STIM
+  %(prog)s --duration 30 --condition NO_FEEDBACK --wells 0 1
         """
     )
 
@@ -1276,13 +1487,19 @@ Examples:
         default=20,
         help="Experiment duration in minutes (default: 20)"
     )
+    parser.add_argument(
+        "--pre-rest-seconds",
+        type=int,
+        default=RUNTIME_PARAMS["pre_rest_seconds"],
+        help="Baseline duration before the game starts in seconds; use 0 to skip (default: 600)",
+    )
 
     parser.add_argument(
         "--condition",
         type=str,
-        choices=["STIMULUS", "RANDOM_STIMULUS", "NO_STIMULUS"],
-        default="STIMULUS",
-        help="Experimental condition (default: STIMULUS)"
+        choices=["STIM", "STIMULUS", "SILENT", "NO_FEEDBACK", "NO-FEEDBACK", "REST"],
+        default="STIM",
+        help="Experimental condition (default: STIM)"
     )
 
     parser.add_argument(
@@ -1292,6 +1509,14 @@ Examples:
         default=[0],
         help="Well indices to use (default: 0)"
     )
+    parser.add_argument("--culture-id", default="unknown_culture", help="Culture identifier")
+    parser.add_argument("--cell-type", default="unknown", help="Cell type, e.g. MCC/HCC_DSI/HCC_NGN2/HEK/CTL")
+    parser.add_argument("--replicate-id", default="unknown_replicate", help="MEA or biological replicate identifier")
+    parser.add_argument("--experiment-day", type=int, default=0, help="Experiment day index")
+    parser.add_argument("--session-index", type=int, default=1, help="Session index within the experiment day")
+    parser.add_argument("--operator", default="", help="Operator name or initials")
+    parser.add_argument("--notes", default="", help="Free-text session notes")
+    parser.add_argument("--recording-root", default=RECORDING_DIR, help="Root directory for session outputs")
 
     args = parser.parse_args()
 
@@ -1299,7 +1524,16 @@ Examples:
         run_pong_experiment(
             duration_minutes=args.duration,
             condition=args.condition,
-            wells=args.wells
+            wells=args.wells,
+            pre_rest_seconds=args.pre_rest_seconds,
+            culture_id=args.culture_id,
+            cell_type=args.cell_type,
+            replicate_id=args.replicate_id,
+            experiment_day=args.experiment_day,
+            session_index=args.session_index,
+            operator=args.operator,
+            notes=args.notes,
+            recording_root=args.recording_root,
         )
         return 0
     except KeyboardInterrupt:

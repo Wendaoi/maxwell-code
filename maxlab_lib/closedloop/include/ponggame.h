@@ -1,23 +1,34 @@
 #ifndef PONGGAME_H
 #define PONGGAME_H
 
+namespace ponggame_defaults
+{
+    inline constexpr int kGameWidth = 480;
+    inline constexpr int kGameHeight = 480;
+    inline constexpr int kPaddleWidth = 0;
+    inline constexpr int kPaddleHeight = 160;
+    inline constexpr int kBallSize = 0;
+} // namespace ponggame_defaults
 
 // 游戏事件，用于触发不同的反馈
-enum class GameEvent {
+enum class GameEvent
+{
     None,
     BallHitPlayerPaddle, // 成功拦截
     PlayerMissed,        // 未成功拦截
 };
 
 // 实验条件
-enum class ExperimentCondition {
-    Stimulus,    // 完整反馈
-    Silent,      // Miss后静默
-    NoFeedback,  // Miss后无中断
-    Rest         // 无感觉输入
+enum class ExperimentCondition
+{
+    Stimulus,   // 完整反馈
+    Silent,     // Miss后静默
+    NoFeedback, // Miss后无中断
+    Rest        // 无感觉输入
 };
 
-class PongGame {
+class PongGame
+{
 public:
     PongGame();
 
@@ -38,8 +49,8 @@ private:
     int ballSize;
 
     // 游戏状态（使用无体积点和线段简化碰撞）
-    int paddleY; // 玩家 (线段起点Y坐标，线段宽度为paddleHeight)
-    float ballX, ballY; // 球作为一个点
+    int paddleY;                  // 玩家 (线段起点Y坐标，线段宽度为paddleHeight)
+    float ballX, ballY;           // 球作为一个点
     float ballSpeedX, ballSpeedY; // 浮点速度以提高精确性
 
     // 实验控制
@@ -47,6 +58,7 @@ private:
 
     // 统计
     int bounces_in_rally;
+    bool reset_bounces_on_next_update;
 
 public:
     // 配置
@@ -57,8 +69,12 @@ public:
     int getPaddle1Y() const { return static_cast<int>(paddleY); }
     int getBallX() const { return static_cast<int>(ballX); }
     int getBallY() const { return static_cast<int>(ballY); }
+    float getBallSpeedX() const { return ballSpeedX; }
+    float getBallSpeedY() const { return ballSpeedY; }
     int getBounces() const { return bounces_in_rally; }
     int getPaddleHeight() const { return paddleHeight; }
+    int getGameWidth() const { return gameWidth; }
+    int getGameHeight() const { return gameHeight; }
 
     // 获取感觉输入信息 (返回0-7代表8个刺激区域, -1代表无刺激，基于球点相对于球拍线段的位置)
     int getSensoryStimZone() const;

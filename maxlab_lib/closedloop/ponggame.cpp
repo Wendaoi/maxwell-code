@@ -3,29 +3,50 @@
 #include <cmath>
 #include <cstdlib>
 
+namespace {
+
+constexpr float kGameWindowMs = 10.0f;
+constexpr float kHalfTripSeconds = 2.5f;
+
+float randomFloat(float minValue, float maxValue) {
+    const float unit = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+    return minValue + unit * (maxValue - minValue);
+}
+
+float randomServeYSpeed(float absSpeedX) {
+    const bool lowBand = (rand() % 2) == 0;
+    const float multiplier = lowBand ? randomFloat(0.5f, 1.0f)
+                                     : randomFloat(1.0f, 2.0f);
+    const float sign = (rand() % 2) == 0 ? -1.0f : 1.0f;
+    return sign * absSpeedX * multiplier;
+}
+
+}  // namespace
+
 PongGame::PongGame() {
-    gameWidth = 640;
-    gameHeight = 480;
-    paddleWidth = 0;
-    paddleHeight = 60;
-    ballSize = 0; // 球无体积，作为点处理
+    gameWidth = ponggame_defaults::kGameWidth;
+    gameHeight = ponggame_defaults::kGameHeight;
+    paddleWidth = ponggame_defaults::kPaddleWidth;
+    paddleHeight = ponggame_defaults::kPaddleHeight;
+    ballSize = ponggame_defaults::kBallSize; // 球无体积，作为点处理
     currentCondition = ExperimentCondition::Stimulus;
     resetBall(true);
     bounces_in_rally = 0;
+    reset_bounces_on_next_update = false;
     paddleY = gameHeight / 2 - paddleHeight / 2;
 }
 
 void PongGame::resetBall(bool randomVector) {
-    ballX = static_cast<float>(gameWidth);  // 球点从右侧边界出发
+    ballX = static_cast<float>(gameWidth) / 2.0f;  // 球画面中心向右出发
     ballY = static_cast<float>(gameHeight) / 2.0f;
+    const float updatesPerHalfTrip = kHalfTripSeconds * 1000.0f / kGameWindowMs;
+    const float serveSpeedX = static_cast<float>(gameWidth) / updatesPerHalfTrip;
     if (randomVector) {
-        ballSpeedX = -0.5f;  // 向左运动
-        ballSpeedY = static_cast<float>((rand() % 10) - 5);
-        
+        ballSpeedX = serveSpeedX;  // 向右运动
     } else {
-        ballSpeedX = -7.0f;  // 向左运动，固定速度
-        ballSpeedY = 3.0f;   // 增加Y方向速度
+        ballSpeedX = -serveSpeedX;  // 向左运动
     }
+    ballSpeedY = randomServeYSpeed(std::fabs(ballSpeedX));
 }
 
 void PongGame::setCondition(ExperimentCondition condition) {
@@ -37,6 +58,11 @@ ExperimentCondition PongGame::getCondition() const {
 }
 
 GameEvent PongGame::update(int spikesUp, int spikesDown) {
+    if (reset_bounces_on_next_update) {
+        bounces_in_rally = 0;
+        reset_bounces_on_next_update = false;
+    }
+
     // 1. 根据尖峰更新玩家球拍位置
     int paddleSpeed = 5;
     if (spikesUp > spikesDown) {
@@ -76,8 +102,8 @@ GameEvent PongGame::updateBallPosition() {
             ballSpeedX = -ballSpeedX; // 反弹，但实际是重置
 
             if (currentCondition != ExperimentCondition::NoFeedback) {
-                bounces_in_rally = 0;
                 resetBall(true);
+                reset_bounces_on_next_update = true;
             }
             return GameEvent::PlayerMissed;
         } else if (newBallX >= static_cast<float>(gameWidth)) {
@@ -134,13 +160,12 @@ int PongGame::getSensoryStimZone() const {
         return -1; // Rest条件下无感觉输入
     }
 
-    // 将球点相对于球拍线段的位置映射到8个感觉刺激区域
-    // 区域 0 = 最底部，区域 7 = 最顶部
-    // 基于球点Y坐标到球拍中心的距离
+    // 将球点相对于球拍线段的位置映射到8个感觉刺激区域。
+    // 屏幕Y坐标向下递增；区域0/pos0在球拍上方，区域7/pos7在球拍下方。
 
     // 计算球点和球拍中心的Y坐标
     float ballCenterY = ballY; // 球为点，其位置即中心
-    float paddleCenterY = static_cast<float>(paddleY + paddleHeight) / 2.0f;
+    float paddleCenterY = static_cast<float>(paddleY) + static_cast<float>(paddleHeight) / 2.0f;
 
     // 计算相对位置 (球相对于球拍中心的Y偏移)
     float relativeY = ballCenterY - paddleCenterY;
