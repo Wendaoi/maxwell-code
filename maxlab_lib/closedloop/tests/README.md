@@ -8,6 +8,7 @@ This directory contains the regression suite for the closed-loop Pong runtime. T
 | --- | --- | --- |
 | `ponggame_test.cpp` | C++ | Game geometry, serve-speed assumptions, sensory-zone mapping, and rally-bounce semantics |
 | `motor_decoder_test.cpp` | C++ | Baseline gain computation, clamping, and identity fallbacks |
+| `spike_detection_test.cpp` | C++ | Paper-aligned raw detector behavior: high-pass activity, MAD thresholding, refractory handling, and median side-path tracking |
 | `runtime_config_test.cpp` | C++ | JSON config parsing, condition aliases, runtime schema validation, and sequence lookup |
 | `runtime_logging_test.cpp` | C++ | Event log, window CSV, and quality summary output format |
 | `runtime_timing_test.cpp` | C++ | Sample-count math and phase elapsed-time helpers |
@@ -22,7 +23,7 @@ Run the non-GUI C++ tests from `maxwell-code/maxlab_lib`:
 
 ```bash
 cd maxwell-code/maxlab_lib
-make test_runtime_config test_runtime_timing test_runtime_logging test_motor_decoder test_ponggame USE_QT=0
+make test_spike_detection test_runtime_config test_runtime_timing test_runtime_logging test_motor_decoder test_ponggame USE_QT=0
 ```
 
 Run the Qt rendering test only on machines with Qt6 available:
@@ -35,7 +36,7 @@ make test_gamewindow USE_QT=1
 Run the Python tests from the repository root:
 
 ```bash
-python3 -m unittest \
+conda run -n base python -m unittest \
   maxwell-code/maxlab_lib/closedloop/tests/test_analysis_tools.py \
   maxwell-code/maxlab_lib/closedloop/tests/test_layout_config.py \
   maxwell-code/maxlab_lib/closedloop/tests/test_pong_setup_analysis.py
@@ -47,11 +48,12 @@ python3 -m unittest \
 | --- | --- |
 | `ponggame.cpp` / `ponggame.h` | `make test_ponggame USE_QT=0` |
 | `motor_decoder.cpp` / `motor_decoder.h` | `make test_motor_decoder USE_QT=0` |
-| `runtime_config.cpp` / `runtime_config.h` / `pong_setup.py` config schema | `make test_runtime_config USE_QT=0` and `python3 -m unittest .../test_layout_config.py` |
-| `runtime_logging.cpp` / analysis log consumers | `make test_runtime_logging USE_QT=0` and `python3 -m unittest .../test_analysis_tools.py` |
+| `spike_detection.cpp` / `spike_detection.h` / `filter.cpp` / `filter.h` | `make test_spike_detection USE_QT=0` |
+| `runtime_config.cpp` / `runtime_config.h` / `pong_setup.py` config schema | `make test_runtime_config USE_QT=0` and `conda run -n base python -m unittest .../test_layout_config.py` |
+| `runtime_logging.cpp` / analysis log consumers | `make test_runtime_logging USE_QT=0` and `conda run -n base python -m unittest .../test_analysis_tools.py` |
 | `runtime_timing.cpp` | `make test_runtime_timing USE_QT=0` |
 | `gamewindow.cpp` | `make test_gamewindow USE_QT=1` |
-| `analysis/*.py` | `python3 -m unittest .../test_analysis_tools.py` |
+| `analysis/*.py` | `conda run -n base python -m unittest .../test_analysis_tools.py` |
 
 ## Notes
 

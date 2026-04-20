@@ -33,7 +33,7 @@ struct RuntimeConfig {
     int hit_feedback_blinding_ms;
     int miss_feedback_blinding_ms;
     double motor_gain_target_hz;
-    double spike_threshold_std = 5.0;
+    double spike_threshold_mad_scale = 5.0;
     double spike_refractory_period_ms = 2.0;
     std::vector<int> motor_up_channels;
     std::vector<int> motor_down_channels;

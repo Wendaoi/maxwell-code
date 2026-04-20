@@ -92,7 +92,7 @@ void test_loader_and_lookup() {
             "quality_summary": "/tmp/quality_summary.json"
         },
         "spike_detection": {
-            "threshold_std": 5.0,
+            "threshold_mad_scale": 5.0,
             "refractory_period_ms": 2.0
         }
     })JSON");
@@ -113,7 +113,7 @@ void test_loader_and_lookup() {
     expect(config.hit_feedback_blinding_ms == 105, "hit_feedback_blinding_ms");
     expect(config.miss_feedback_blinding_ms == 4005, "miss_feedback_blinding_ms");
     expect(config.motor_gain_target_hz == 20.0, "motor_gain_target_hz");
-    expect(config.spike_threshold_std == 5.0, "spike_threshold_std");
+    expect(config.spike_threshold_mad_scale == 5.0, "spike_threshold_mad_scale");
     expect(config.spike_refractory_period_ms == 2.0, "spike_refractory_period_ms");
     expect(config.motor_up_channels.size() == 2, "motor_up_channels");
     expect(config.motor_down_channels.size() == 2, "motor_down_channels");
@@ -133,8 +133,66 @@ void test_loader_and_lookup() {
         (void)config.sequence_for(2, 0);
     } catch (const std::out_of_range&) {
         caught = true;
-    }
+        }
     expect(caught, "sequence_for out_of_range");
+}
+
+void test_legacy_threshold_std_alias() {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "runtime_config_legacy_threshold.json";
+    write_file(path, R"JSON({
+        "condition": "STIM",
+        "runtime": {
+            "stream_mode": "raw",
+            "sample_rate_hz": 20000.0,
+            "window_ms": 10,
+            "pre_rest_seconds": 600,
+            "game_seconds": 1200,
+            "exclude_initial_game_seconds": 10,
+            "miss_feedback_duration_ms": 4000,
+            "miss_pause_ms": 4000,
+            "hit_sensory_suppression_ms": 100,
+            "sensory_blinding_ms": 5,
+            "hit_feedback_blinding_ms": 105,
+            "miss_feedback_blinding_ms": 4005,
+            "motor_gain_target_hz": 20.0
+        },
+        "channels": {
+            "motor_up_channels": [1],
+            "motor_down_channels": [2],
+            "stim_channels": [3]
+        },
+        "sequences": {
+            "ball_position": {
+                "positions": ["p0"],
+                "frequencies": [4],
+                "sequence_lookup": {
+                    "p0": {"4": "p0_4hz"}
+                }
+            },
+            "hit_feedback": {
+                "sequence_name": "hit_feedback"
+            },
+            "miss_feedback": {
+                "sequence_names": ["miss_feedback_0"]
+            }
+        },
+        "recording": {
+            "session_name": "session_legacy",
+            "raw_h5": "/tmp/session_legacy.raw.h5",
+            "runtime_events": "/tmp/runtime_events_legacy.jsonl",
+            "window_samples": "/tmp/window_samples_legacy.csv",
+            "quality_summary": "/tmp/quality_summary_legacy.json"
+        },
+        "spike_detection": {
+            "threshold_std": 7.5,
+            "refractory_period_ms": 2.0
+        }
+    })JSON");
+
+    const RuntimeConfig config = load_runtime_config(path.string());
+    expect(config.spike_threshold_mad_scale == 7.5,
+           "threshold_std legacy alias should map to spike_threshold_mad_scale");
 }
 
 void test_missing_required_field() {
@@ -259,7 +317,7 @@ void test_unicode_escape_sequences_in_json_strings() {
             "description": "Motor 1/2 \u00d7 UP/DOWN"
         },
         "spike_detection": {
-            "threshold_std": 5.0,
+            "threshold_mad_scale": 5.0,
             "refractory_period_ms": 2.0
         }
     })JSON");
@@ -275,6 +333,7 @@ int main() {
     try {
         test_alias_parsers();
         test_loader_and_lookup();
+        test_legacy_threshold_std_alias();
         test_missing_required_field();
         test_invalid_runtime_contract_throws();
         test_unicode_escape_sequences_in_json_strings();

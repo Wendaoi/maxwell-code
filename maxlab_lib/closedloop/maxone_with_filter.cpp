@@ -673,7 +673,8 @@ static RunConfig parse_args(int argc, char* argv[]) {
 
     config.channel_count = infer_channel_count(config.runtime);
     config.detector.sample_rate_hz = config.runtime.sample_rate_hz;
-    config.detector.threshold_multiplier = static_cast<float>(config.runtime.spike_threshold_std);
+    config.detector.threshold_mad_scale =
+        static_cast<float>(config.runtime.spike_threshold_mad_scale);
     config.detector.refractory_samples = std::max(
         1,
         static_cast<int>(std::lround(config.runtime.spike_refractory_period_ms *

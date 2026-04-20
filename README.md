@@ -101,7 +101,8 @@ These parameters are not set by `pong_setup.py`; they are the daily checkerboard
 | Record time per configuration | `15 s` |
 | High-pass filter | `300 Hz` |
 | Gain | `512x` |
-| Spike threshold | `6 sigma` above background noise |
+| Daily activity-scan spike threshold | `6 sigma` above background noise |
+| Closed-loop runtime spike detector | `100 Hz` 2nd-order Bessel high-pass -> absolute value -> `1 Hz` 1st-order Bessel low-pass MAD estimate -> MAD-scaled negative threshold crossing |
 | Daily outputs to track | Mean firing rate, max firing rate, firing rate variance |
 
 The helper in `maxlab_lib/closedloop/analysis/daily_activity_scan.py` writes these same fixed assumptions into `daily_activity_scan_manifest.json`.

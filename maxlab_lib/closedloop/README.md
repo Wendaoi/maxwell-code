@@ -12,7 +12,7 @@
 | `maxone_with_filter.cpp` | Main runtime loop. Loads JSON config, receives streamed data, decodes motor activity, advances Pong, emits stimulation, and logs events/windows/quality data. |
 | `ponggame.cpp` | Pure game-state update logic and the condition-specific hit/miss behavior. |
 | `motor_decoder.cpp` | Baseline-aware gain normalization for up/down motor channel groups. |
-| `spike_detection.cpp` | Streaming spike detector for raw traces, including filtering, adaptive thresholding, and refractory handling. |
+| `spike_detection.cpp` | Streaming spike detector for raw traces, including 100 Hz high-pass activity extraction, 1 Hz MAD estimation, a separate 1 Hz median side path, and refractory handling. |
 | `filter.cpp` | First-order low-pass and second-order high-pass filters used by `spike_detection.cpp`. |
 | `runtime_config.cpp` | JSON parser and runtime contract loader for the Python-to-C++ handoff. |
 | `runtime_logging.cpp` | Writes `runtime_events.jsonl`, `window_samples.csv`, and `quality_summary.json`. |

@@ -4,11 +4,15 @@
 #include <cmath>
 
 SpikeDetector::ChannelState::ChannelState(const SpikeDetectorConfig& config)
-    : highpass(config.highpass_hz, config.highpass_q, config.sample_rate_hz),
-      lowpass(config.lowpass_hz, config.sample_rate_hz),
-      smoothed_abs(0.0f),
-      threshold(config.min_threshold),
-      prev_value(0.0f),
+    : median_lowpass(config.median_lowpass_hz, config.sample_rate_hz),
+      highpass(config.highpass_hz, config.highpass_q, config.sample_rate_hz),
+      mad_lowpass(config.mad_lowpass_hz, config.sample_rate_hz),
+      median_estimate(0.0f),
+      activity(0.0f),
+      absolute_deviation(0.0f),
+      mad_estimate(0.0f),
+      threshold(0.0f),
+      prev_activity(0.0f),
       samples_since_last_spike(0),
       spike_count(0) {}
 
@@ -22,11 +26,15 @@ SpikeDetector::SpikeDetector(std::size_t channel_count, const SpikeDetectorConfi
 
 void SpikeDetector::resetFilters() {
     for (auto& channel : channels_) {
+        channel.median_lowpass.reset();
         channel.highpass.reset();
-        channel.lowpass.reset();
-        channel.smoothed_abs = 0.0f;
-        channel.threshold = config_.min_threshold;
-        channel.prev_value = 0.0f;
+        channel.mad_lowpass.reset();
+        channel.median_estimate = 0.0f;
+        channel.activity = 0.0f;
+        channel.absolute_deviation = 0.0f;
+        channel.mad_estimate = 0.0f;
+        channel.threshold = 0.0f;
+        channel.prev_activity = 0.0f;
         channel.samples_since_last_spike = 0;
     }
 }
@@ -57,21 +65,34 @@ void SpikeDetector::getCounts(std::vector<std::uint32_t>* out) const {
     }
 }
 
+SpikeDetector::ChannelDebugState SpikeDetector::debugState(std::size_t channel) const {
+    if (channel >= channels_.size()) {
+        return {};
+    }
+
+    const ChannelState& state = channels_[channel];
+    ChannelDebugState debug;
+    debug.median_estimate = state.median_estimate;
+    debug.activity = state.activity;
+    debug.mad_estimate = state.mad_estimate;
+    debug.threshold = state.threshold;
+    return debug;
+}
+
 std::size_t SpikeDetector::channelCount() const {
     return channels_.size();
 }
 
 void SpikeDetector::processSample(ChannelState& state, float value) {
-    const float filtered = state.highpass.filterOne(value);
-    const float abs_value = std::fabs(filtered);
-    state.smoothed_abs = state.lowpass.filterOne(abs_value);
-
-    state.threshold = (std::min)(config_.min_threshold,
-                                 -state.smoothed_abs * config_.threshold_multiplier);
+    state.activity = state.highpass.filterOne(value);
+    state.absolute_deviation = std::fabs(state.activity);
+    state.mad_estimate = state.mad_lowpass.filterOne(state.absolute_deviation);
+    state.threshold = -state.mad_estimate * config_.threshold_mad_scale;
+    state.median_estimate = state.median_lowpass.filterOne(value);
 
     bool spike = false;
     if (state.samples_since_last_spike >= config_.refractory_samples) {
-        if (state.prev_value > state.threshold && filtered <= state.threshold) {
+        if (state.prev_activity > state.threshold && state.activity <= state.threshold) {
             spike = true;
         }
     }
@@ -83,5 +104,5 @@ void SpikeDetector::processSample(ChannelState& state, float value) {
         state.samples_since_last_spike++;
     }
 
-    state.prev_value = filtered;
+    state.prev_activity = state.activity;
 }

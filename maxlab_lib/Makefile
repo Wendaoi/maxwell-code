@@ -104,6 +104,12 @@ test_runtime_logging:
 		$(BUILD_PATH)/runtime_logging_test
 .PHONY: test_runtime_logging
 
+test_spike_detection:
+		mkdir -p $(BUILD_PATH)
+		$(CXX) $(TEST_CXXFLAGS) closedloop/tests/spike_detection_test.cpp closedloop/spike_detection.cpp closedloop/filter.cpp -o $(BUILD_PATH)/spike_detection_test $(CLOSEDLOOP_INCLUDES)
+		$(BUILD_PATH)/spike_detection_test
+.PHONY: test_spike_detection
+
 example_raw: $(BUILD_PATH)/process_raw_data.o
 		$(CXX) $^ -o $(BUILD_PATH)/$@ $(EXAMPLE_INCLUDES) $(LDFLAGS)
 

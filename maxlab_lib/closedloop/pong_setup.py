@@ -1166,7 +1166,7 @@ def export_cpp_config(
         },
 
         "spike_detection": {
-            "threshold_std": 5.0,
+            "threshold_mad_scale": 5.0,
             "refractory_period_ms": 2.0
         }
     }

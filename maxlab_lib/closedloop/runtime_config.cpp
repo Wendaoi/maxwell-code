@@ -469,8 +469,8 @@ void validate_runtime_contract(const RuntimeConfig& config) {
         config.miss_feedback_blinding_ms < 0) {
         throw std::runtime_error("runtime timings must be non-negative");
     }
-    if (config.spike_threshold_std <= 0.0) {
-        throw std::runtime_error("spike_detection.threshold_std must be positive");
+    if (config.spike_threshold_mad_scale <= 0.0) {
+        throw std::runtime_error("spike_detection.threshold_mad_scale must be positive");
     }
     if (config.spike_refractory_period_ms < 0.0) {
         throw std::runtime_error("spike_detection.refractory_period_ms must be non-negative");
@@ -588,7 +588,14 @@ RuntimeConfig load_runtime_config(const std::string& path) {
 
     if (const JsonValue* spike_detection = optional_member(root_object, "spike_detection")) {
         const auto& spike_object = require_object(*spike_detection, "spike_detection");
-        config.spike_threshold_std = require_number(require_member(spike_object, "threshold_std"), "spike_detection.threshold_std");
+        if (const JsonValue* mad_scale = optional_member(spike_object, "threshold_mad_scale")) {
+            config.spike_threshold_mad_scale =
+                require_number(*mad_scale, "spike_detection.threshold_mad_scale");
+        } else {
+            config.spike_threshold_mad_scale =
+                require_number(require_member(spike_object, "threshold_std"),
+                               "spike_detection.threshold_std");
+        }
         config.spike_refractory_period_ms = require_number(require_member(spike_object, "refractory_period_ms"), "spike_detection.refractory_period_ms");
     }
 
