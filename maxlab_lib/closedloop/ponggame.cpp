@@ -7,6 +7,14 @@ namespace {
 
 constexpr float kGameWindowMs = 10.0f;
 constexpr float kHalfTripSeconds = 2.5f;
+constexpr float kPaddleMoveRelativeThreshold = 0.03f;
+constexpr int kPaddleSpeedPixelsPerUpdate = 5;
+constexpr int kUpdatesPerSecond = static_cast<int>(1000.0f / kGameWindowMs);
+constexpr int kPaddleTravelRange =
+    ponggame_defaults::kGameHeight - ponggame_defaults::kPaddleHeight;
+
+static_assert(kPaddleSpeedPixelsPerUpdate * kUpdatesPerSecond >= kPaddleTravelRange,
+              "Paddle speed must cover the full travel range within one second");
 
 float randomFloat(float minValue, float maxValue) {
     const float unit = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
@@ -64,11 +72,17 @@ GameEvent PongGame::update(int spikesUp, int spikesDown) {
     }
 
     // 1. 根据尖峰更新玩家球拍位置
-    int paddleSpeed = 5;
-    if (spikesUp > spikesDown) {
-        paddleY -= paddleSpeed;
-    } else if (spikesDown > spikesUp) {
-        paddleY += paddleSpeed;
+    const float total_spikes = static_cast<float>(spikesUp + spikesDown);
+    if (total_spikes > 0.0f) {
+        const float relative_difference =
+            std::fabs(static_cast<float>(spikesUp - spikesDown)) / total_spikes;
+        if (relative_difference > kPaddleMoveRelativeThreshold) {
+            if (spikesUp > spikesDown) {
+                paddleY -= kPaddleSpeedPixelsPerUpdate;
+            } else if (spikesDown > spikesUp) {
+                paddleY += kPaddleSpeedPixelsPerUpdate;
+            }
+        }
     }
     paddleY = std::max(0, std::min(paddleY, gameHeight - paddleHeight));
 

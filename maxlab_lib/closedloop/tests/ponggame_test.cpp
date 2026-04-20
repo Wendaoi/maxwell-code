@@ -67,6 +67,44 @@ void test_serve_y_speed_ratio_is_randomized_in_required_bands() {
            "about half of serves should use the 1.0x-2.0x y-speed band");
 }
 
+void test_paddle_stays_put_when_relative_difference_is_within_three_percent() {
+    PongGame game;
+    const int initial_y = game.getPaddle1Y();
+
+    (void)game.update(103, 100);
+    expect(game.getPaddle1Y() == initial_y,
+           "paddle should not move when relative spike difference is at most three percent");
+}
+
+void test_paddle_moves_when_relative_difference_exceeds_three_percent() {
+    PongGame game;
+    const int initial_y = game.getPaddle1Y();
+
+    (void)game.update(104, 96);
+    expect(game.getPaddle1Y() < initial_y,
+           "paddle should move up when relative spike difference exceeds three percent");
+}
+
+void test_paddle_can_travel_from_top_to_bottom_within_one_second() {
+    PongGame game;
+
+    while (game.getPaddle1Y() > 0) {
+        (void)game.update(100, 0);
+    }
+
+    const int bottom_y = game.getGameHeight() - game.getPaddleHeight();
+    int steps = 0;
+    while (game.getPaddle1Y() < bottom_y && steps < 100) {
+        (void)game.update(0, 100);
+        ++steps;
+    }
+
+    expect(game.getPaddle1Y() == bottom_y,
+           "paddle should reach the bottom edge within one second of updates");
+    expect(steps <= 100,
+           "paddle should require at most 100 updates to travel from top to bottom");
+}
+
 void test_miss_preserves_completed_rally_bounces_until_next_update() {
     std::srand(1);
     PongGame game;
@@ -115,6 +153,9 @@ int main() {
         test_rest_condition_suppresses_sensory_zone();
         test_serve_speed_sets_five_second_round_trip();
         test_serve_y_speed_ratio_is_randomized_in_required_bands();
+        test_paddle_stays_put_when_relative_difference_is_within_three_percent();
+        test_paddle_moves_when_relative_difference_exceeds_three_percent();
+        test_paddle_can_travel_from_top_to_bottom_within_one_second();
         test_miss_preserves_completed_rally_bounces_until_next_update();
     } catch (const std::exception& e) {
         std::cerr << "ponggame_test failed: " << e.what() << '\n';
