@@ -44,10 +44,12 @@ void test_loader_and_lookup() {
             "pre_rest_seconds": 600,
             "game_seconds": 1200,
             "exclude_initial_game_seconds": 10,
-            "artifact_blanking_samples": 8,
             "miss_feedback_duration_ms": 4000,
             "miss_pause_ms": 300,
             "hit_sensory_suppression_ms": 150,
+            "sensory_blinding_ms": 5,
+            "hit_feedback_blinding_ms": 105,
+            "miss_feedback_blinding_ms": 4005,
             "motor_gain_target_hz": 20.0,
             "positions": ["p0", "p1"],
             "frequencies": [4, 8],
@@ -104,10 +106,12 @@ void test_loader_and_lookup() {
     expect(config.pre_rest_seconds == 600, "pre_rest_seconds");
     expect(config.game_seconds == 1200, "game_seconds");
     expect(config.exclude_initial_game_seconds == 10, "exclude_initial_game_seconds");
-    expect(config.artifact_blanking_samples == 8, "artifact_blanking_samples");
     expect(config.miss_feedback_duration_ms == 4000, "miss_feedback_duration_ms");
     expect(config.miss_pause_ms == 300, "miss_pause_ms");
     expect(config.hit_sensory_suppression_ms == 150, "hit_sensory_suppression_ms");
+    expect(config.sensory_blinding_ms == 5, "sensory_blinding_ms");
+    expect(config.hit_feedback_blinding_ms == 105, "hit_feedback_blinding_ms");
+    expect(config.miss_feedback_blinding_ms == 4005, "miss_feedback_blinding_ms");
     expect(config.motor_gain_target_hz == 20.0, "motor_gain_target_hz");
     expect(config.spike_threshold_std == 5.0, "spike_threshold_std");
     expect(config.spike_refractory_period_ms == 2.0, "spike_refractory_period_ms");
@@ -161,10 +165,12 @@ void test_invalid_runtime_contract_throws() {
             "stream_mode": "raw",
             "sample_rate_hz": 20000,
             "window_ms": 10,
-            "artifact_blanking_samples": 0,
             "miss_feedback_duration_ms": 0,
             "miss_pause_ms": 0,
             "hit_sensory_suppression_ms": 0,
+            "sensory_blinding_ms": 5,
+            "hit_feedback_blinding_ms": 105,
+            "miss_feedback_blinding_ms": 4005,
             "motor_gain_target_hz": 20
         },
         "channels": {
@@ -214,10 +220,12 @@ void test_unicode_escape_sequences_in_json_strings() {
             "pre_rest_seconds": 600,
             "game_seconds": 1200,
             "exclude_initial_game_seconds": 10,
-            "artifact_blanking_samples": 0,
             "miss_feedback_duration_ms": 4000,
             "miss_pause_ms": 4000,
             "hit_sensory_suppression_ms": 100,
+            "sensory_blinding_ms": 5,
+            "hit_feedback_blinding_ms": 105,
+            "miss_feedback_blinding_ms": 4005,
             "motor_gain_target_hz": 20
         },
         "channels": {

@@ -26,10 +26,12 @@ struct RuntimeConfig {
     int pre_rest_seconds;
     int game_seconds;
     int exclude_initial_game_seconds;
-    int artifact_blanking_samples;
     int miss_feedback_duration_ms;
     int miss_pause_ms;
     int hit_sensory_suppression_ms;
+    int sensory_blinding_ms;
+    int hit_feedback_blinding_ms;
+    int miss_feedback_blinding_ms;
     double motor_gain_target_hz;
     double spike_threshold_std = 5.0;
     double spike_refractory_period_ms = 2.0;

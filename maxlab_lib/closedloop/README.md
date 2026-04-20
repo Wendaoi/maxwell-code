@@ -31,7 +31,7 @@
    - `8` miss feedback variants
 3. Python writes `session_manifest.json`, `session_config.json`, and `resolved_layout.json`, then starts MaxLab recording and launches `build/maxone_with_filter`.
 4. During the pre-rest phase, the C++ runtime accumulates motor baseline windows and freezes decoder gains before gameplay begins.
-5. During gameplay, the runtime advances the Pong model every `10 ms`, chooses the sensory sequence that matches current ball position and horizontal velocity bin, and emits hit/miss feedback according to the selected condition.
+5. During gameplay, the runtime advances the Pong model every `10 ms`, chooses the sensory sequence that matches current ball position and horizontal velocity bin, emits hit/miss feedback according to the selected condition, and applies readout-only blinding after sensory and feedback stimulation so artifacts do not enter the motor decoder.
 6. The runtime logs replayable events plus per-window motor/game state, and the `analysis/` helpers consume those files later for figure-level metrics.
 
 ## Supported Runtime Conditions

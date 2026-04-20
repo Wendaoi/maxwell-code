@@ -113,10 +113,12 @@ RUNTIME_PARAMS = {
     "pre_rest_seconds": 600,
     "game_seconds": 1200,
     "exclude_initial_game_seconds": 10,
-    "artifact_blanking_samples": 200,
     "miss_feedback_duration_ms": STIM_PARAMS["miss_feedback"]["burst_duration_ms"],
     "miss_pause_ms": 4000,
     "hit_sensory_suppression_ms": 100,
+    "sensory_blinding_ms": 5,
+    "hit_feedback_blinding_ms": STIM_PARAMS["hit_feedback"]["burst_duration_ms"] + 5,
+    "miss_feedback_blinding_ms": STIM_PARAMS["miss_feedback"]["burst_duration_ms"] + 5,
     "motor_gain_target_hz": 20.0,
     "stream_mode": "raw",
 }

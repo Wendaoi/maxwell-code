@@ -399,6 +399,9 @@ class PongSetupMetadataTest(unittest.TestCase):
             },
         )
         self.assertEqual(cpp_config["runtime"]["pre_rest_seconds"], 0)
+        self.assertEqual(cpp_config["runtime"]["sensory_blinding_ms"], 5)
+        self.assertEqual(cpp_config["runtime"]["hit_feedback_blinding_ms"], 105)
+        self.assertEqual(cpp_config["runtime"]["miss_feedback_blinding_ms"], 4005)
 
     def test_main_passes_pre_rest_seconds_to_run_pong_experiment(self):
         with import_pong_setup_with_fake_maxlab() as (pong_setup, _):

@@ -46,6 +46,15 @@ std::uint64_t samples_per_sensory_interval(double sample_rate_hz, int frequency_
                                 "invalid sensory frequency");
 }
 
+std::uint64_t extend_blinding_until(std::uint64_t current_frame,
+                                    std::uint64_t duration_samples,
+                                    std::uint64_t active_until_sample) {
+    if (duration_samples == 0) {
+        return active_until_sample;
+    }
+    return std::max(active_until_sample, current_frame + duration_samples);
+}
+
 int elapsed_ms_from_phase_start(std::uint64_t phase_start_frame,
                                 std::uint64_t current_frame,
                                 double sample_rate_hz) {

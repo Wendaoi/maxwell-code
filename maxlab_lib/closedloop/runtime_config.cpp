@@ -461,10 +461,12 @@ void validate_runtime_contract(const RuntimeConfig& config) {
     if (config.motor_gain_target_hz <= 0.0) {
         throw std::runtime_error("runtime.motor_gain_target_hz must be positive");
     }
-    if (config.artifact_blanking_samples < 0 ||
-        config.miss_feedback_duration_ms < 0 ||
+    if (config.miss_feedback_duration_ms < 0 ||
         config.miss_pause_ms < 0 ||
-        config.hit_sensory_suppression_ms < 0) {
+        config.hit_sensory_suppression_ms < 0 ||
+        config.sensory_blinding_ms < 0 ||
+        config.hit_feedback_blinding_ms < 0 ||
+        config.miss_feedback_blinding_ms < 0) {
         throw std::runtime_error("runtime timings must be non-negative");
     }
     if (config.spike_threshold_std <= 0.0) {
@@ -576,10 +578,12 @@ RuntimeConfig load_runtime_config(const std::string& path) {
     config.pre_rest_seconds = static_cast<int>(require_int(require_member(runtime_object, "pre_rest_seconds"), "runtime.pre_rest_seconds"));
     config.game_seconds = static_cast<int>(require_int(require_member(runtime_object, "game_seconds"), "runtime.game_seconds"));
     config.exclude_initial_game_seconds = static_cast<int>(require_int(require_member(runtime_object, "exclude_initial_game_seconds"), "runtime.exclude_initial_game_seconds"));
-    config.artifact_blanking_samples = static_cast<int>(require_int(require_member(runtime_object, "artifact_blanking_samples"), "runtime.artifact_blanking_samples"));
     config.miss_feedback_duration_ms = static_cast<int>(require_int(require_member(runtime_object, "miss_feedback_duration_ms"), "runtime.miss_feedback_duration_ms"));
     config.miss_pause_ms = static_cast<int>(require_int(require_member(runtime_object, "miss_pause_ms"), "runtime.miss_pause_ms"));
     config.hit_sensory_suppression_ms = static_cast<int>(require_int(require_member(runtime_object, "hit_sensory_suppression_ms"), "runtime.hit_sensory_suppression_ms"));
+    config.sensory_blinding_ms = static_cast<int>(require_int(require_member(runtime_object, "sensory_blinding_ms"), "runtime.sensory_blinding_ms"));
+    config.hit_feedback_blinding_ms = static_cast<int>(require_int(require_member(runtime_object, "hit_feedback_blinding_ms"), "runtime.hit_feedback_blinding_ms"));
+    config.miss_feedback_blinding_ms = static_cast<int>(require_int(require_member(runtime_object, "miss_feedback_blinding_ms"), "runtime.miss_feedback_blinding_ms"));
     config.motor_gain_target_hz = require_number(require_member(runtime_object, "motor_gain_target_hz"), "runtime.motor_gain_target_hz");
 
     if (const JsonValue* spike_detection = optional_member(root_object, "spike_detection")) {

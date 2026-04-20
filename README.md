@@ -159,7 +159,9 @@ These are the parameters currently embedded in `pong_setup.py`, `layout_config.p
 | Miss feedback params | `5 Hz`, `150 mV`, `4 s`, `200 us` phase width |
 | Miss pause after feedback | `4000 ms` |
 | Hit sensory suppression | `100 ms` |
-| Artifact blanking | `200` samples |
+| Sensory readout blinding | `5 ms` |
+| Hit readout blinding | `105 ms` (`100 ms` burst + `5 ms`) |
+| Miss readout blinding | `4005 ms` (`4000 ms` burst + `5 ms`) |
 | Motor decoder gain target | `20 Hz` |
 | Stim-neighbor fallback radius | `2` electrode rings |
 | Recording layout | `1024` recording electrodes total |

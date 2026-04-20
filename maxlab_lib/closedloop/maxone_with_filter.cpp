@@ -136,7 +136,7 @@ struct AppState {
 
     RuntimeConfig runtime;
     uint64_t samples_per_game_window;
-    uint64_t artifact_blanking_samples = 0;
+    uint64_t readout_blinding_until_sample = 0;
     uint64_t pause_until_sample = 0;
     uint64_t suppress_sensory_until_sample = 0;
     uint64_t next_sensory_sample = 0;
@@ -154,6 +154,7 @@ struct AppState {
     RuntimeLogger logger;
     GameWindow* window;
     std::vector<std::uint32_t> spike_counts;
+    bool window_has_blinded_readout = false;
     uint64_t accepted_frames_in_window = 0;
     uint64_t accepted_stream_frames = 0;
     std::mt19937 rng;
@@ -165,6 +166,7 @@ static void on_sigint(int) {
 
 static void reset_window(AppState& state) {
     state.detector.resetCounts();
+    state.window_has_blinded_readout = false;
     state.accepted_frames_in_window = 0;
     state.window_start_frame = state.accepted_stream_frames;
 }
@@ -176,6 +178,22 @@ static void update_window(AppState& state) {
                                state.pong_game.getBallY(),
                                state.pong_game.getPaddleHeight());
     }
+}
+
+static bool readout_blinded(const AppState& state) {
+    return state.accepted_stream_frames <= state.readout_blinding_until_sample;
+}
+
+static void apply_readout_blinding(AppState& state, int duration_ms) {
+    if (duration_ms <= 0) {
+        return;
+    }
+    const uint64_t duration_samples =
+        samples_for_duration_ms(state.runtime.sample_rate_hz, duration_ms);
+    state.readout_blinding_until_sample =
+        extend_blinding_until(state.accepted_stream_frames,
+                              duration_samples,
+                              state.readout_blinding_until_sample);
 }
 
 static bool poll_start_signal(bool enable_sync) {
@@ -225,12 +243,13 @@ static std::size_t frequency_index_for_ball_x(int ball_x,
 
 static bool can_send_sensory(const AppState& state) {
     return state.runtime.condition != RuntimeCondition::Rest &&
-           state.artifact_blanking_samples == 0 &&
            state.accepted_stream_frames >= state.pause_until_sample &&
            state.accepted_stream_frames >= state.suppress_sensory_until_sample;
 }
 
-static void send_sequence_with_blanking(AppState& state, const std::string& sequence_name) {
+static void send_sequence_with_blinding(AppState& state,
+                                        const std::string& sequence_name,
+                                        int blinding_ms) {
     if (sequence_name.empty()) {
         return;
     }
@@ -241,8 +260,7 @@ static void send_sequence_with_blanking(AppState& state, const std::string& sequ
                                  "' with status " +
                                  std::to_string(static_cast<int>(status)));
     }
-    state.artifact_blanking_samples =
-        static_cast<uint64_t>(std::max(0, state.runtime.artifact_blanking_samples));
+    apply_readout_blinding(state, blinding_ms);
     std::cout << "[STIM] sendSequence(" << sequence_name << ")" << std::endl;
     state.logger.logEvent("sequence_sent",
                           state.accepted_stream_frames,
@@ -291,7 +309,7 @@ static void maybe_send_sensory(AppState& state) {
     }
 
     const std::string& sequence_name = state.runtime.sequence_for(position_index, frequency_index);
-    send_sequence_with_blanking(state, sequence_name);
+    send_sequence_with_blinding(state, sequence_name, state.runtime.sensory_blinding_ms);
     state.logger.logEvent("sensory_stimulus",
                           state.accepted_stream_frames,
                           state.phase,
@@ -308,7 +326,9 @@ static void handle_hit(AppState& state) {
                           "bounces=" + std::to_string(state.pong_game.getBounces()));
 
     if (state.runtime.condition == RuntimeCondition::Stimulus) {
-        send_sequence_with_blanking(state, state.runtime.hit_feedback_sequence);
+        send_sequence_with_blinding(state,
+                                    state.runtime.hit_feedback_sequence,
+                                    state.runtime.hit_feedback_blinding_ms);
         state.suppress_sensory_until_sample =
             state.accepted_stream_frames +
             samples_for_duration_ms(state.runtime.sample_rate_hz,
@@ -329,7 +349,9 @@ static void handle_miss(AppState& state) {
         !state.runtime.miss_feedback_sequences.empty()) {
         std::uniform_int_distribution<std::size_t> dist(
             0, state.runtime.miss_feedback_sequences.size() - 1);
-        send_sequence_with_blanking(state, state.runtime.miss_feedback_sequences[dist(state.rng)]);
+        send_sequence_with_blinding(state,
+                                    state.runtime.miss_feedback_sequences[dist(state.rng)],
+                                    state.runtime.miss_feedback_blinding_ms);
     }
 
     if (state.runtime.condition == RuntimeCondition::Stimulus ||
@@ -379,8 +401,11 @@ static void handle_window(AppState& state) {
         return;
     }
 
-    const GameEvent event = state.pong_game.update(static_cast<int>(motor.corrected_up),
-                                                   static_cast<int>(motor.corrected_down));
+    GameEvent event = GameEvent::None;
+    if (!state.window_has_blinded_readout) {
+        event = state.pong_game.update(static_cast<int>(motor.corrected_up),
+                                       static_cast<int>(motor.corrected_down));
+    }
 
     switch (event) {
         case GameEvent::None:
@@ -500,8 +525,8 @@ static bool receive_and_process_frame(AppState& state, const RunConfig& config) 
         }
         ++state.accepted_frames_in_window;
         ++state.accepted_stream_frames;
-        if (state.artifact_blanking_samples > 0) {
-            --state.artifact_blanking_samples;
+        if (readout_blinded(state)) {
+            state.window_has_blinded_readout = true;
             return true;
         }
         state.detector.processFrame(frame_data.amplitudes, maxlab::RawFrameData::amplitudeCount);
@@ -525,8 +550,8 @@ static bool receive_and_process_frame(AppState& state, const RunConfig& config) 
     }
     ++state.accepted_frames_in_window;
     ++state.accepted_stream_frames;
-    if (state.artifact_blanking_samples > 0) {
-        --state.artifact_blanking_samples;
+    if (readout_blinded(state)) {
+        state.window_has_blinded_readout = true;
         return true;
     }
     for (uint64_t i = 0; i < frame_data.spikeCount; ++i) {
@@ -549,7 +574,9 @@ static void log_runtime_config(const RunConfig& config) {
               << " pre_rest_seconds=" << runtime.pre_rest_seconds
               << " game_seconds=" << runtime.game_seconds
               << " sample_rate_hz=" << runtime.sample_rate_hz
-              << " artifact_blanking_samples=" << runtime.artifact_blanking_samples
+              << " sensory_blinding_ms=" << runtime.sensory_blinding_ms
+              << " hit_feedback_blinding_ms=" << runtime.hit_feedback_blinding_ms
+              << " miss_feedback_blinding_ms=" << runtime.miss_feedback_blinding_ms
               << " miss_feedback_duration_ms=" << runtime.miss_feedback_duration_ms
               << " miss_pause_ms=" << runtime.miss_pause_ms
               << " hit_sensory_suppression_ms=" << runtime.hit_sensory_suppression_ms
