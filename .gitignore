@@ -16,5 +16,8 @@ maxlab_lib/build/
 *.swp
 *.swo
 
+# Project-local git worktrees
+.worktrees/
+
 AGENTS.md
 CLAUDE.md
