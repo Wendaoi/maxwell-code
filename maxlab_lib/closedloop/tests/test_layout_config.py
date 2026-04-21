@@ -398,6 +398,15 @@ class PongSetupMetadataTest(unittest.TestCase):
                 "quality_summary": str(Path(tmpdir) / "quality_summary.json"),
             },
         )
+        self.assertTrue(
+            cpp_config["game_parameters"]["position_mapping"]["description"].startswith(
+                "Map absolute ball Y position [0, game_height) to position index"
+            )
+        )
+        self.assertIn(
+            "ball_y / (game_height / 1.0)",
+            cpp_config["game_parameters"]["position_mapping"]["formula"],
+        )
         self.assertEqual(cpp_config["runtime"]["pre_rest_seconds"], 0)
         self.assertEqual(cpp_config["runtime"]["sensory_blinding_ms"], 5)
         self.assertEqual(cpp_config["runtime"]["hit_feedback_blinding_ms"], 105)

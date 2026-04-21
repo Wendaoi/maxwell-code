@@ -1139,8 +1139,8 @@ def export_cpp_config(
             "update_rate_ms": 10,
             "num_positions": len(position_names),
             "position_mapping": {
-                "description": f"Normalize ball Y position [0,1] to position index [0,{len(position_names)-1}]",
-                "formula": f"pos_idx = int(ball_y * {len(position_names) - 0.01})"
+                "description": f"Map absolute ball Y position [0, game_height) to position index [0,{len(position_names)-1}]",
+                "formula": f"pos_idx = clamp(int(ball_y / (game_height / {len(position_names)}.0)), 0, {len(position_names)-1})"
             },
             "distance_to_frequency": {
                 "description": "Map ball distance [0,1] to frequency index [0,9]",

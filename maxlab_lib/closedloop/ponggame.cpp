@@ -174,19 +174,10 @@ int PongGame::getSensoryStimZone() const {
         return -1; // Rest条件下无感觉输入
     }
 
-    // 将球点相对于球拍线段的位置映射到8个感觉刺激区域。
-    // 屏幕Y坐标向下递增；区域0/pos0在球拍上方，区域7/pos7在球拍下方。
-
-    // 计算球点和球拍中心的Y坐标
-    float ballCenterY = ballY; // 球为点，其位置即中心
-    float paddleCenterY = static_cast<float>(paddleY) + static_cast<float>(paddleHeight) / 2.0f;
-
-    // 计算相对位置 (球相对于球拍中心的Y偏移)
-    float relativeY = ballCenterY - paddleCenterY;
-
-    // 将相对位置映射到8个区域 (范围 [-gameHeight/2, gameHeight/2] 均匀分为8个区域)
+    // 将球点在画面中的绝对Y坐标映射到8个感觉刺激区域。
+    // 屏幕Y坐标向下递增；区域0/pos0对应最上方，区域7/pos7对应最下方。
     const float zoneRange = static_cast<float>(gameHeight) / 8.0f;
-    int offsetY = static_cast<int>((relativeY + gameHeight / 2.0f) / zoneRange);
+    int offsetY = static_cast<int>(ballY / zoneRange);
 
     // 边界处理：确保在0-7范围内
     if (offsetY < 0) offsetY = 0;

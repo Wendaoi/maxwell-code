@@ -76,7 +76,7 @@ public:
     int getGameWidth() const { return gameWidth; }
     int getGameHeight() const { return gameHeight; }
 
-    // 获取感觉输入信息 (返回0-7代表8个刺激区域, -1代表无刺激，基于球点相对于球拍线段的位置)
+    // 获取感觉输入信息 (返回0-7代表8个刺激区域, -1代表无刺激，基于球点在画面中的绝对Y位置)
     int getSensoryStimZone() const;
 };
 

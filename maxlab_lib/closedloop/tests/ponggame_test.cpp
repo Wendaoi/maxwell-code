@@ -1,4 +1,6 @@
+#define private public
 #include "ponggame.h"
+#undef private
 
 #include <cmath>
 #include <cstdlib>
@@ -24,6 +26,21 @@ void test_centered_default_state_maps_to_center_zone() {
     PongGame game;
 
     expect(game.getSensoryStimZone() == 4, "centered default state should map to zone 4");
+}
+
+void test_sensory_zone_depends_on_absolute_ball_y_not_paddle_position() {
+    PongGame upper_paddle;
+    upper_paddle.ballY = 90.0f;
+    upper_paddle.paddleY = 0;
+
+    PongGame lower_paddle;
+    lower_paddle.ballY = 90.0f;
+    lower_paddle.paddleY = lower_paddle.getGameHeight() - lower_paddle.getPaddleHeight();
+
+    expect(upper_paddle.getSensoryStimZone() == 1,
+           "absolute ballY=90 should map to zone 1");
+    expect(lower_paddle.getSensoryStimZone() == 1,
+           "sensory zone should not change when only paddle position changes");
 }
 
 void test_rest_condition_suppresses_sensory_zone() {
@@ -150,6 +167,7 @@ void test_miss_preserves_completed_rally_bounces_until_next_update() {
 int main() {
     try {
         test_centered_default_state_maps_to_center_zone();
+        test_sensory_zone_depends_on_absolute_ball_y_not_paddle_position();
         test_rest_condition_suppresses_sensory_zone();
         test_serve_speed_sets_five_second_round_trip();
         test_serve_y_speed_ratio_is_randomized_in_required_bands();
